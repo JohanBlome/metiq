@@ -648,7 +648,9 @@ class AudioReaderFFmpeg(metiq_reader_generic.AudioReaderBase):
                     pass
 
             if self.debug > 0:
-                start_time_sec = self._start_samples / self._samplerate if self._samplerate else 0
+                start_time_sec = (
+                    self._start_samples / self._samplerate if self._samplerate else 0
+                )
                 print(
                     f"AudioReader: {self._samplerate} Hz, {self._channels} channels, "
                     f"{self._duration:.2f}s, start_samples={self._start_samples} ({start_time_sec:.3f}s)"
@@ -680,8 +682,16 @@ class AudioReaderFFmpeg(metiq_reader_generic.AudioReaderBase):
                     self._skip_samples = audio_info.get_skip_time_track_samples()
 
                     if self.debug > 1:
-                        start_time_sec = self._start_samples / self._samplerate if self._samplerate else 0
-                        skip_time_sec = self._skip_samples / self._samplerate if self._samplerate else 0
+                        start_time_sec = (
+                            self._start_samples / self._samplerate
+                            if self._samplerate
+                            else 0
+                        )
+                        skip_time_sec = (
+                            self._skip_samples / self._samplerate
+                            if self._samplerate
+                            else 0
+                        )
                         print(
                             f"AudioReader: container analysis: "
                             f"start_samples={self._start_samples} ({start_time_sec:.6f}s), "
@@ -780,7 +790,9 @@ class AudioReaderFFmpeg(metiq_reader_generic.AudioReaderBase):
             # atrim parameter is in INPUT samples (track timescale)
             af_filters.append(f"atrim=start_sample={self._skip_samples}")
             if self.debug > 0:
-                skip_time_sec = self._skip_samples / self._samplerate if self._samplerate else 0
+                skip_time_sec = (
+                    self._skip_samples / self._samplerate if self._samplerate else 0
+                )
                 print(
                     f"AudioReader: trimming {skip_time_sec:.3f}s from start "
                     f"({self._skip_samples} samples @ {self._samplerate}Hz input rate)"
@@ -791,7 +803,9 @@ class AudioReaderFFmpeg(metiq_reader_generic.AudioReaderBase):
             # adelay parameter is in INPUT samples (track timescale)
             af_filters.append(f"adelay={self._start_samples}S:all=1")
             if self.debug > 0:
-                start_time_sec = self._start_samples / self._samplerate if self._samplerate else 0
+                start_time_sec = (
+                    self._start_samples / self._samplerate if self._samplerate else 0
+                )
                 print(
                     f"AudioReader: adding {start_time_sec:.3f}s delay "
                     f"({self._start_samples} samples @ {self._samplerate}Hz input rate)"

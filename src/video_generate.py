@@ -46,23 +46,35 @@ def _pipe_frames_to_ffmpeg(width, height, fps, outfile, frame_generator):
         frame_generator: Iterator/generator yielding numpy arrays (frames)
     """
     ffmpeg_cmd = [
-        "ffmpeg", "-y",
-        "-f", "rawvideo",
-        "-pixel_format", "rgb24",
-        "-s", f"{width}x{height}",
-        "-r", str(fps),
-        "-i", "pipe:0",
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        outfile
+        "ffmpeg",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pixel_format",
+        "rgb24",
+        "-s",
+        f"{width}x{height}",
+        "-r",
+        str(fps),
+        "-i",
+        "pipe:0",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        outfile,
     ]
 
-    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(
+        ffmpeg_cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     try:
         for img in frame_generator:
             # Handle both numpy arrays and raw bytes
-            if hasattr(img, 'tobytes'):
+            if hasattr(img, "tobytes"):
                 proc.stdin.write(img.tobytes())
             else:
                 proc.stdin.write(img)
