@@ -7,6 +7,7 @@ import argparse
 import cv2
 import graycode
 import math
+import subprocess
 import sys
 import numpy as np
 
@@ -86,7 +87,23 @@ def video_generate_noise(width, height, fps, num_frames, outfile, vft_id, debug)
     m = (160, 160, 160)
     s = (80, 80, 80)
 
-    with open(outfile, "wb") as rawstream:
+    # Start ffmpeg process to encode video from piped raw frames
+    ffmpeg_cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
+        "-pixel_format", "rgb24",
+        "-s", f"{width}x{height}",
+        "-r", str(fps),
+        "-i", "pipe:0",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        outfile
+    ]
+
+    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    try:
         # original image
         for frame_num in range(0, num_frames, 1):
             img = np.zeros((height, width, 3), np.uint8)
@@ -99,8 +116,18 @@ def video_generate_noise(width, height, fps, num_frames, outfile, vft_id, debug)
             vft_height = y1 - y0
             img = vft.draw_tags(img, vft_id, image_info.vft_border_size, debug)
 
-            # write the image
-            rawstream.write(img.tobytes())
+            # write the image to ffmpeg stdin
+            proc.stdin.write(img.tobytes())
+
+        proc.stdin.close()
+        stdout, stderr = proc.communicate()
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {stderr.decode()}")
+    except Exception as e:
+        proc.kill()
+        proc.wait()
+        raise e
 
 
 def video_generate(
@@ -118,7 +145,24 @@ def video_generate(
 ):
     image_info = video_common.ImageInfo(width, height)
     vft_layout = vft.VFTLayout(width, height, vft_id)
-    with open(outfile, "wb") as rawstream:
+
+    # Start ffmpeg process to encode video from piped raw frames
+    ffmpeg_cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
+        "-pixel_format", "rgb24",
+        "-s", f"{width}x{height}",
+        "-r", str(fps),
+        "-i", "pipe:0",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        outfile
+    ]
+
+    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    try:
         font = cv2.FONT_HERSHEY_SIMPLEX
         fontscale = 1.0
         # Need to make sure we can fit the second text not knowing the actual rem text
@@ -151,7 +195,17 @@ def video_generate(
                 fontscale,
                 debug,
             )
-            rawstream.write(img)
+            proc.stdin.write(img)
+
+        proc.stdin.close()
+        stdout, stderr = proc.communicate()
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {stderr.decode()}")
+    except Exception as e:
+        proc.kill()
+        proc.wait()
+        raise e
 
 
 def get_options(argv):

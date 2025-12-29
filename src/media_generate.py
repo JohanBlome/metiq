@@ -24,23 +24,16 @@ def media_generate_noise_video(outfile, **kwarg):
     pre_samples = kwarg.get("pre_samples", audio_common.DEFAULT_PRE_SAMPLES)
     debug = kwarg.get("debug", common.DEFAULT_DEBUG)
 
-    video_filename = tempfile.NamedTemporaryFile().name + ".rgb24"
+    # video_generate_noise now outputs encoded video directly
     video_generate.video_generate_noise(
-        width, height, fps, num_frames, video_filename, vft_id, debug
+        width, height, fps, num_frames, outfile, vft_id, debug
     )
     duration_sec = num_frames / fps
 
-    if outfile[-3:] != "y4m":
+    if outfile[-3:] == "y4m":
         print(
-            f"Warning! {outfile[-3:]} should be y4m for an uncompressed original. Noise is hard to encode."
+            f"Warning! Output is now encoded MP4, not raw y4m. Consider using .mp4 extension."
         )
-    command = "ffmpeg -y "
-    command += f"-f rawvideo -pixel_format rgb24 -s {width}x{height} -r {fps} -i {video_filename} "
-    command += f" -pix_fmt yuv420p {outfile}"
-    ret, stdout, stderr = common.run(command, debug=debug)
-    assert ret == 0, f"error: {stderr}"
-    # clean up raw files
-    os.remove(video_filename)
 
 
 def media_generate(outfile, **kwarg):
@@ -65,8 +58,8 @@ def media_generate(outfile, **kwarg):
     vft_layout = vft.VFTLayout(width, height, vft_id)
     max_frame_num = 2**vft_layout.numbits
     frame_period = beep_period_frames * (max_frame_num // beep_period_frames)
-    # generate the (raw) video input
-    video_filename = tempfile.NamedTemporaryFile().name + ".rgb24"
+    # generate the encoded video directly (no longer raw RGB24)
+    video_filename = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
     rem = f"period: {beep_period_sec} freq_hz: {beep_freq} samples: {beep_duration_samples}"
     if len(audio_sample) > 0:
         rem = f"period: {beep_period_sec} signal: {audio_sample}"
@@ -99,13 +92,13 @@ def media_generate(outfile, **kwarg):
         audio_sample=audio_sample,
         debug=debug,
     )
-    # put them together
+    # mux them together (stream copy the pre-encoded video)
     command = "ffmpeg -y "
-    command += f"-f rawvideo -pixel_format rgb24 -s {width}x{height} -r {fps} -i {video_filename} "
+    command += f"-i {video_filename} "
     command += f"-i {audio_filename} "
-    command += f"-c:v libx264 -pix_fmt yuv420p -c:a aac {outfile}"
+    command += f"-c:v copy -c:a aac {outfile}"
     ret, stdout, stderr = common.run(command, debug=debug)
     assert ret == 0, f"error: {stderr}"
-    # clean up raw files
+    # clean up temp files
     os.remove(video_filename)
     os.remove(audio_filename)
