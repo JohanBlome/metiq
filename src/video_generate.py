@@ -35,6 +35,49 @@ default_values = {
 }
 
 
+def _pipe_frames_to_ffmpeg(width, height, fps, outfile, frame_generator):
+    """Helper to pipe frames from a generator to ffmpeg.
+
+    Args:
+        width: Video width in pixels
+        height: Video height in pixels
+        fps: Frames per second
+        outfile: Output file path
+        frame_generator: Iterator/generator yielding numpy arrays (frames)
+    """
+    ffmpeg_cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
+        "-pixel_format", "rgb24",
+        "-s", f"{width}x{height}",
+        "-r", str(fps),
+        "-i", "pipe:0",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        outfile
+    ]
+
+    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        for img in frame_generator:
+            # Handle both numpy arrays and raw bytes
+            if hasattr(img, 'tobytes'):
+                proc.stdin.write(img.tobytes())
+            else:
+                proc.stdin.write(img)
+
+        proc.stdin.close()
+        stdout, stderr = proc.communicate()
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {stderr.decode()}")
+    except Exception as e:
+        proc.kill()
+        proc.wait()
+        raise e
+
+
 def image_generate(
     image_info,
     frame_num,
@@ -81,31 +124,16 @@ def image_generate(
 
 
 def video_generate_noise(width, height, fps, num_frames, outfile, vft_id, debug):
+    """Generate video with random noise and VFT ArUco markers (for encoder stress testing)."""
     image_info = video_common.ImageInfo(width, height)
     vft_layout = vft.VFTLayout(width, height, vft_id)
 
     m = (160, 160, 160)
     s = (80, 80, 80)
 
-    # Start ffmpeg process to encode video from piped raw frames
-    ffmpeg_cmd = [
-        "ffmpeg", "-y",
-        "-f", "rawvideo",
-        "-pixel_format", "rgb24",
-        "-s", f"{width}x{height}",
-        "-r", str(fps),
-        "-i", "pipe:0",
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        outfile
-    ]
-
-    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    try:
-        # original image
-        for frame_num in range(0, num_frames, 1):
+    def generate_noise_frames():
+        """Generator that yields noise frames with VFT tags."""
+        for frame_num in range(num_frames):
             img = np.zeros((height, width, 3), np.uint8)
             time = (frame_num // fps) + (frame_num % fps) / fps
             img = cv2.randn(img, m, s)
@@ -115,19 +143,9 @@ def video_generate_noise(width, height, fps, num_frames, outfile, vft_id, debug)
             vft_width = x1 - x0
             vft_height = y1 - y0
             img = vft.draw_tags(img, vft_id, image_info.vft_border_size, debug)
+            yield img
 
-            # write the image to ffmpeg stdin
-            proc.stdin.write(img.tobytes())
-
-        proc.stdin.close()
-        stdout, stderr = proc.communicate()
-
-        if proc.returncode != 0:
-            raise RuntimeError(f"ffmpeg failed: {stderr.decode()}")
-    except Exception as e:
-        proc.kill()
-        proc.wait()
-        raise e
+    _pipe_frames_to_ffmpeg(width, height, fps, outfile, generate_noise_frames())
 
 
 def video_generate(
@@ -143,39 +161,24 @@ def video_generate(
     rem,
     debug,
 ):
+    """Generate video with VFT timing codes, text overlays, and beep indicators."""
     image_info = video_common.ImageInfo(width, height)
     vft_layout = vft.VFTLayout(width, height, vft_id)
 
-    # Start ffmpeg process to encode video from piped raw frames
-    ffmpeg_cmd = [
-        "ffmpeg", "-y",
-        "-f", "rawvideo",
-        "-pixel_format", "rgb24",
-        "-s", f"{width}x{height}",
-        "-r", str(fps),
-        "-i", "pipe:0",
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        outfile
-    ]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    fontscale = 1.0
+    # Need to make sure we can fit the second text not knowing the actual rem text
+    while True:
+        textwidth = cv2.getTextSize(
+            f"fps: fps:30 resolution: 123x123 {rem}", font, fontscale, 2
+        )
+        fontscale = fontscale * 0.9
+        if textwidth[0][0] <= width:
+            break
 
-    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE,
-                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    try:
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        fontscale = 1.0
-        # Need to make sure we can fit the second text not knowing the actual rem text
-        while True:
-            textwidth = cv2.getTextSize(
-                f"fps: fps:30 resolution: 123x123 {rem}", font, fontscale, 2
-            )
-            fontscale = fontscale * 0.9
-            if textwidth[0][0] <= width:
-                break
-
-        # original image
-        for frame_num in range(0, num_frames, 1):
+    def generate_frames():
+        """Generator that yields video frames with VFT codes and text."""
+        for frame_num in range(num_frames):
             img = np.zeros((height, width, 3), np.uint8)
             time = (frame_num // fps) + (frame_num % fps) / fps
             actual_frame_num = frame_num % frame_period
@@ -195,17 +198,9 @@ def video_generate(
                 fontscale,
                 debug,
             )
-            proc.stdin.write(img)
+            yield img
 
-        proc.stdin.close()
-        stdout, stderr = proc.communicate()
-
-        if proc.returncode != 0:
-            raise RuntimeError(f"ffmpeg failed: {stderr.decode()}")
-    except Exception as e:
-        proc.kill()
-        proc.wait()
-        raise e
+    _pipe_frames_to_ffmpeg(width, height, fps, outfile, generate_frames())
 
 
 def get_options(argv):
