@@ -267,16 +267,6 @@ input_args = {
             "help": "Lock layout",
         },
     },
-    "analysis_type": {
-        "func": ANALYZE,
-        "short": "-a",
-        "long": "--analysis-type",
-        "args": {
-            "type": str,
-            "help": "Analysis type",
-            "default": default_values["analysis_type"],
-        },
-    },
     "input": {
         "func": PARSE,
         "short": "-i",
