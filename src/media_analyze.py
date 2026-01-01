@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import os
 import json
+import subprocess
 
 import audio_parse
 import media_parse
@@ -806,37 +807,439 @@ def video_latency_function(**kwargs):
             print("Warning. No video latency results")
 
 
-def avsync_stats_function(avsync_results, output_stats):
+def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fps=30.0):
     """
     Calculate and write A/V sync statistics to JSON file.
 
     Args:
-        avsync_results: DataFrame containing A/V sync analysis results with 'avsync_sec' column
+        avsync_results: DataFrame containing A/V sync analysis results with columns:
+                        'avsync_sec', 'video_timestamp', 'audio_timestamp'
         output_stats: Path to output JSON file for statistics
+        source_file: Optional source filename for reference in JSON output
+        ref_fps: Reference frame rate (default 30.0) for quantization-aware thresholds
     """
     if avsync_results is None or len(avsync_results) == 0:
         print("No avsync results to write statistics")
         return
 
-    # Calculate statistics
+    # Calculate frame time for quantization-aware thresholds
+    # Video is discrete, so there's inherent ±0.5 frame quantization error
+    frame_time_ms = (1000.0 / ref_fps) if ref_fps > 0 else 33.33  # Default to 30fps
+
+    # Calculate basic statistics
     avsync_sec_average = np.average(avsync_results["avsync_sec"])
     avsync_sec_stddev = np.std(avsync_results["avsync_sec"])
     avsync_sec_p50 = np.percentile(avsync_results["avsync_sec"], 50)
     avsync_sec_p90 = np.percentile(avsync_results["avsync_sec"], 90)
+    avsync_sec_min = np.min(avsync_results["avsync_sec"])
+    avsync_sec_max = np.max(avsync_results["avsync_sec"])
+
+    # Convert to milliseconds for threshold comparisons
+    avsync_ms = avsync_results["avsync_sec"] * 1000
+
+    # Issue detection
+    issues = []
+    issue_details = {}
+
+    # Define all thresholds explicitly with rationale
+    # Note: Video quantization introduces ±0.5 frame time error inherently
+    THRESHOLDS = {
+        # ITU-R BT.1359-1 standard thresholds (independent of frame rate)
+        "itu_r_detectable_min_ms": -125,
+        "itu_r_detectable_max_ms": 45,
+        "itu_r_acceptable_min_ms": -185,
+        "itu_r_acceptable_max_ms": 90,
+        # Drift thresholds
+        "drift_rate_threshold_ms_per_sec": 10,  # 10ms/sec is noticeable
+        "drift_total_threshold_ms": 50,  # 50ms total drift is significant
+        # Jitter/variance threshold
+        "jitter_threshold_ms": max(30, frame_time_ms),  # At least 30ms or 1 frame
+        # Sudden jump threshold: Must be > 1 frame time to account for quantization
+        "sudden_jump_threshold_ms": frame_time_ms * 2.0,  # 2 frame times
+        # Periodic oscillation: Autocorrelation strength threshold
+        "oscillation_correlation_threshold": 0.5,  # Require strong correlation
+        "oscillation_min_period": 5,  # Ignore very short periods (likely noise)
+        # Non-monotonic drift: Require significant slope changes
+        "drift_direction_min_slope": 0.001,  # Minimum slope to consider a direction (1ms per sample)
+        # Outlier detection: IQR multiplier
+        "outlier_iqr_multiplier": 1.5,  # Standard IQR outlier detection
+        "outlier_percentage_threshold": 5.0,  # Flag if >5% are outliers
+        # Temporal segmentation: Changes between time segments
+        "temporal_avg_change_threshold_ms": max(
+            50, frame_time_ms * 1.5
+        ),  # 50ms or 1.5 frames
+        "temporal_std_change_threshold_ms": max(20, frame_time_ms),  # 20ms or 1 frame
+    }
+
+    # 1. ITU-R BT.1359-1 threshold violations
+    detectable_violations = (
+        (avsync_ms < THRESHOLDS["itu_r_detectable_min_ms"])
+        | (avsync_ms > THRESHOLDS["itu_r_detectable_max_ms"])
+    ).sum()
+    acceptable_violations = (
+        (avsync_ms < THRESHOLDS["itu_r_acceptable_min_ms"])
+        | (avsync_ms > THRESHOLDS["itu_r_acceptable_max_ms"])
+    ).sum()
+
+    if acceptable_violations > 0:
+        issues.append("itu_r_acceptable_threshold_violation")
+        issue_details["itu_r_acceptable_threshold_violation"] = {
+            "count": int(acceptable_violations),
+            "percentage": float(acceptable_violations / len(avsync_results) * 100),
+            "threshold_range_ms": [
+                THRESHOLDS["itu_r_acceptable_min_ms"],
+                THRESHOLDS["itu_r_acceptable_max_ms"],
+            ],
+            "actual_min_ms": float(avsync_sec_min * 1000),
+            "actual_max_ms": float(avsync_sec_max * 1000),
+            "description": "A/V sync values outside ITU-R BT.1359-1 acceptable range (-185ms to +90ms)",
+        }
+    elif detectable_violations > 0:
+        issues.append("itu_r_detectable_threshold_violation")
+        issue_details["itu_r_detectable_threshold_violation"] = {
+            "count": int(detectable_violations),
+            "percentage": float(detectable_violations / len(avsync_results) * 100),
+            "threshold_range_ms": [
+                THRESHOLDS["itu_r_detectable_min_ms"],
+                THRESHOLDS["itu_r_detectable_max_ms"],
+            ],
+            "actual_min_ms": float(avsync_sec_min * 1000),
+            "actual_max_ms": float(avsync_sec_max * 1000),
+            "description": "A/V sync values outside ITU-R BT.1359-1 detectable range (-125ms to +45ms)",
+        }
+
+    # 2. Drift detection - calculate linear regression
+    if "video_timestamp" in avsync_results.columns and len(avsync_results) > 1:
+        timestamps = avsync_results["video_timestamp"].values
+        avsync_values = avsync_results["avsync_sec"].values
+
+        # Simple linear fit: avsync = drift_rate * time + offset
+        coeffs = np.polyfit(timestamps, avsync_values, 1)
+        drift_rate_sec_per_sec = coeffs[0]
+        drift_rate_ms_per_sec = drift_rate_sec_per_sec * 1000
+
+        # Calculate total drift over the measurement period
+        time_span = timestamps[-1] - timestamps[0]
+        total_drift_ms = drift_rate_ms_per_sec * time_span
+
+        if (
+            abs(drift_rate_ms_per_sec) > THRESHOLDS["drift_rate_threshold_ms_per_sec"]
+            or abs(total_drift_ms) > THRESHOLDS["drift_total_threshold_ms"]
+        ):
+            issues.append("drift")
+            issue_details["drift"] = {
+                "drift_rate_ms_per_sec": float(drift_rate_ms_per_sec),
+                "total_drift_ms": float(total_drift_ms),
+                "time_span_sec": float(time_span),
+                "actual_min_ms": float(avsync_sec_min * 1000),
+                "actual_max_ms": float(avsync_sec_max * 1000),
+                "threshold_rate_ms_per_sec": THRESHOLDS[
+                    "drift_rate_threshold_ms_per_sec"
+                ],
+                "threshold_total_ms": THRESHOLDS["drift_total_threshold_ms"],
+                "description": "Linear clock drift between audio and video over time",
+            }
+
+    # 3. High jitter/variance
+    jitter_ms = avsync_sec_stddev * 1000
+
+    if jitter_ms > THRESHOLDS["jitter_threshold_ms"]:
+        issues.append("high_jitter")
+        issue_details["high_jitter"] = {
+            "stddev_ms": float(jitter_ms),
+            "threshold_ms": THRESHOLDS["jitter_threshold_ms"],
+            "description": "High variance in A/V sync measurements indicating unstable synchronization",
+        }
+
+    # 4. Sudden jumps/discontinuities
+    if len(avsync_results) > 1:
+        avsync_diff = np.diff(avsync_results["avsync_sec"].values)
+        jump_threshold_sec = THRESHOLDS["sudden_jump_threshold_ms"] / 1000.0
+
+        large_jumps = np.abs(avsync_diff) > jump_threshold_sec
+        num_jumps = large_jumps.sum()
+
+        if num_jumps > 0:
+            jump_indices = np.where(large_jumps)[0]
+
+            # Detect measurement errors: single bad points that cause jumps
+            # For each jump, test if removing the landing point eliminates the issue
+            measurement_errors = set()
+            avsync_values = avsync_results["avsync_sec"].values
+
+            for idx in jump_indices:
+                # Test removing the landing point (idx+1)
+                landing_idx = idx + 1
+                if (
+                    landing_idx < len(avsync_values) - 1
+                ):  # Need at least one point after
+                    # Create array without this point
+                    test_values = np.concatenate(
+                        [avsync_values[:landing_idx], avsync_values[landing_idx + 1 :]]
+                    )
+                    test_diff = np.diff(test_values)
+
+                    # Check if jumps around this position disappear
+                    # The jump at idx maps to idx in test_diff (before removal point)
+                    # The jump at idx+1 maps to idx in test_diff (after removal point)
+                    test_large_jumps = np.abs(test_diff) > jump_threshold_sec
+
+                    # If removing this point eliminates the jump at this position
+                    if idx < len(test_diff) and not test_large_jumps[idx]:
+                        measurement_errors.add(landing_idx)
+
+            # Filter out measurement errors from jump reporting
+            valid_jumps = [
+                idx for idx in jump_indices if (idx + 1) not in measurement_errors
+            ]
+
+            if len(valid_jumps) > 0:
+                issues.append("sudden_jumps")
+
+                # Get actual timestamps and frame numbers for jumps
+                # np.diff index i represents transition from row i to row i+1
+                # Report the landing point (i+1)
+                jump_details = []
+                for idx in valid_jumps[:10]:  # First 10 only
+                    jump_info = {}
+                    if "video_timestamp" in avsync_results.columns:
+                        jump_info["video_timestamp_sec"] = float(
+                            avsync_results.iloc[idx + 1]["video_timestamp"]
+                        )
+                    if "frame_num" in avsync_results.columns:
+                        jump_info["frame_num"] = int(
+                            avsync_results.iloc[idx + 1]["frame_num"]
+                        )
+                    jump_info["jump_magnitude_ms"] = float(abs(avsync_diff[idx]) * 1000)
+                    jump_details.append(jump_info)
+
+                issue_details["sudden_jumps"] = {
+                    "count": len(valid_jumps),
+                    "max_jump_ms": float(
+                        np.max(np.abs(avsync_diff[valid_jumps])) * 1000
+                    ),
+                    "jump_locations": jump_details,
+                    "threshold_ms": THRESHOLDS["sudden_jump_threshold_ms"],
+                    "frame_time_ms": frame_time_ms,
+                    "description": "Discontinuous jumps in A/V sync greater than 2 frame times",
+                }
+
+            # Report measurement errors separately if found
+            if len(measurement_errors) > 0:
+                issues.append("measurement_errors")
+                error_details = []
+                for err_idx in sorted(measurement_errors)[:10]:  # First 10 only
+                    error_info = {}
+                    if "video_timestamp" in avsync_results.columns:
+                        error_info["video_timestamp_sec"] = float(
+                            avsync_results.iloc[err_idx]["video_timestamp"]
+                        )
+                    if "frame_num" in avsync_results.columns:
+                        error_info["frame_num"] = int(
+                            avsync_results.iloc[err_idx]["frame_num"]
+                        )
+                    error_info["avsync_ms"] = float(
+                        avsync_results.iloc[err_idx]["avsync_sec"] * 1000
+                    )
+                    error_details.append(error_info)
+
+                issue_details["measurement_errors"] = {
+                    "count": len(measurement_errors),
+                    "error_locations": error_details,
+                    "description": "Single bad measurements causing apparent jumps down and back up",
+                }
+
+    # 5. Periodic oscillation detection
+    if len(avsync_results) > 10:
+        # Detrend the signal first
+        from scipy import signal
+
+        avsync_detrended = signal.detrend(avsync_results["avsync_sec"].values)
+
+        # Use autocorrelation to detect periodicity
+        autocorr = np.correlate(avsync_detrended, avsync_detrended, mode="full")
+        autocorr = autocorr[len(autocorr) // 2 :]
+        autocorr = autocorr / autocorr[0]  # Normalize
+
+        # Look for peaks in autocorrelation (excluding the zero-lag peak)
+        if len(autocorr) > 5:
+            # Find local maxima in first half of autocorrelation
+            search_range = min(len(autocorr) // 2, 50)
+            local_max_indices = []
+            for i in range(THRESHOLDS["oscillation_min_period"], search_range):
+                if (
+                    autocorr[i] > autocorr[i - 1]
+                    and autocorr[i] > autocorr[i + 1]
+                    and autocorr[i] > THRESHOLDS["oscillation_correlation_threshold"]
+                ):
+                    local_max_indices.append(i)
+
+            if len(local_max_indices) > 0:
+                issues.append("periodic_oscillation")
+                issue_details["periodic_oscillation"] = {
+                    "peak_periods_samples": local_max_indices[:5],  # First 5 periods
+                    "autocorrelation_strength": float(autocorr[local_max_indices[0]]),
+                    "threshold_correlation": THRESHOLDS[
+                        "oscillation_correlation_threshold"
+                    ],
+                    "min_period_samples": THRESHOLDS["oscillation_min_period"],
+                    "description": "Regular periodic pattern in A/V sync drift",
+                }
+
+    # 6. Non-monotonic drift
+    if len(avsync_results) > 10:
+        # Use moving window to detect drift direction changes
+        window_size = max(5, len(avsync_results) // 10)
+        drift_directions = []
+
+        for i in range(0, len(avsync_results) - window_size, window_size):
+            window = avsync_results["avsync_sec"].values[i : i + window_size]
+            # Linear regression on window
+            x = np.arange(len(window))
+            slope = np.polyfit(x, window, 1)[0]
+            # Only count as a direction if slope is significant
+            if abs(slope) > THRESHOLDS["drift_direction_min_slope"]:
+                drift_directions.append(1 if slope > 0 else -1)
+            else:
+                drift_directions.append(0)  # No significant drift
+
+        # Count direction changes (ignore transitions to/from 0)
+        if len(drift_directions) > 1:
+            direction_changes = 0
+            prev_nonzero = None
+            for d in drift_directions:
+                if d != 0:
+                    if prev_nonzero is not None and d != prev_nonzero:
+                        direction_changes += 1
+                    prev_nonzero = d
+
+            if direction_changes > 0:
+                issues.append("non_monotonic_drift")
+                issue_details["non_monotonic_drift"] = {
+                    "direction_changes": direction_changes,
+                    "num_segments": len(drift_directions),
+                    "min_slope_threshold": THRESHOLDS["drift_direction_min_slope"],
+                    "description": "Drift direction changes over time (audio catching up then falling behind)",
+                }
+
+    # 7. Temporal segmentation - compare first and last thirds
+    if len(avsync_results) > 30:
+        segment_size = len(avsync_results) // 3
+        first_third = avsync_results["avsync_sec"].values[:segment_size]
+        last_third = avsync_results["avsync_sec"].values[-segment_size:]
+
+        first_avg = np.mean(first_third)
+        last_avg = np.mean(last_third)
+        first_std = np.std(first_third)
+        last_std = np.std(last_third)
+
+        avg_change_ms = abs(last_avg - first_avg) * 1000
+        std_change_ms = abs(last_std - first_std) * 1000
+
+        if (
+            avg_change_ms > THRESHOLDS["temporal_avg_change_threshold_ms"]
+            or std_change_ms > THRESHOLDS["temporal_std_change_threshold_ms"]
+        ):
+            issues.append("temporal_segmentation")
+            issue_details["temporal_segmentation"] = {
+                "first_third_avg_ms": float(first_avg * 1000),
+                "last_third_avg_ms": float(last_avg * 1000),
+                "avg_change_ms": float(avg_change_ms),
+                "first_third_std_ms": float(first_std * 1000),
+                "last_third_std_ms": float(last_std * 1000),
+                "std_change_ms": float(std_change_ms),
+                "threshold_avg_change_ms": THRESHOLDS[
+                    "temporal_avg_change_threshold_ms"
+                ],
+                "threshold_std_change_ms": THRESHOLDS[
+                    "temporal_std_change_threshold_ms"
+                ],
+                "description": "Significant change in A/V sync behavior between beginning and end of recording",
+            }
+
+    # 8. Outlier detection using IQR method
+    q1 = np.percentile(avsync_results["avsync_sec"], 25)
+    q3 = np.percentile(avsync_results["avsync_sec"], 75)
+    iqr = q3 - q1
+
+    lower_bound = q1 - THRESHOLDS["outlier_iqr_multiplier"] * iqr
+    upper_bound = q3 + THRESHOLDS["outlier_iqr_multiplier"] * iqr
+
+    outliers = (avsync_results["avsync_sec"] < lower_bound) | (
+        avsync_results["avsync_sec"] > upper_bound
+    )
+    num_outliers = outliers.sum()
+    outlier_percentage = num_outliers / len(avsync_results) * 100
+
+    if outlier_percentage > THRESHOLDS["outlier_percentage_threshold"]:
+        issues.append("outliers")
+        issue_details["outliers"] = {
+            "count": int(num_outliers),
+            "percentage": float(outlier_percentage),
+            "iqr_bounds_ms": [float(lower_bound * 1000), float(upper_bound * 1000)],
+            "iqr_multiplier": THRESHOLDS["outlier_iqr_multiplier"],
+            "percentage_threshold": THRESHOLDS["outlier_percentage_threshold"],
+            "description": "Statistical outliers in A/V sync measurements using IQR method",
+        }
+
+    # Separate issues into errors and warnings
+    warning_types = {"measurement_errors", "itu_r_detectable_threshold_violation"}
+
+    errors = [issue for issue in issues if issue not in warning_types]
+    warnings = [issue for issue in issues if issue in warning_types]
+
+    error_details = {k: v for k, v in issue_details.items() if k not in warning_types}
+    warning_details = {k: v for k, v in issue_details.items() if k in warning_types}
+
+    # Generate summary
+    if len(errors) == 0 and len(warnings) == 0:
+        summary = "ok"
+    else:
+        summary = errors + warnings
 
     # Write statistics to JSON file if output_stats is provided
     if output_stats:
         stats = {
             "avsync": {
+                "summary": summary,
                 "avsync_sec": {
                     "average": float(avsync_sec_average),
                     "stddev": float(avsync_sec_stddev),
+                    "min": float(avsync_sec_min),
+                    "max": float(avsync_sec_max),
                     "p50": float(avsync_sec_p50),
                     "p90": float(avsync_sec_p90),
                     "size": len(avsync_results),
-                }
+                },
+                "errors": error_details,
+                "warnings": warning_details,
             }
         }
+
+        # Add source file as first entry if provided
+        if source_file:
+            stats = {"file": source_file, **stats}
+
+        # Add metiq version and command information
+        metiq_info = {}
+
+        # Get git version
+        try:
+            git_version = subprocess.check_output(
+                ["/usr/bin/git", "describe", "HEAD"],
+                cwd=os.path.dirname(__file__),
+                text=True,
+            ).strip()
+            metiq_info["version"] = git_version
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            metiq_info["version"] = "unknown"
+
+        # Get command line
+        metiq_info["command"] = " ".join(sys.argv)
+
+        # Add metiq section to stats
+        stats = {"metiq": metiq_info, **stats}
+
         with open(output_stats, "w") as f:
             json.dump(stats, f, indent=2)
 
@@ -902,7 +1305,18 @@ def avsync_function(**kwargs):
 
     # calculate and write statistics
     if output_stats is not None:
-        avsync_stats_function(avsync_results, output_stats)
+        # Extract source filename from input_video
+        input_video = kwargs.get("input_video", None)
+        source_file = None
+        if input_video:
+            # Remove path and .video.csv extension
+            base = os.path.basename(input_video)
+            if base.endswith(".video.csv"):
+                source_file = base[: -len(".video.csv")]
+            else:
+                source_file = base
+
+        avsync_stats_function(avsync_results, output_stats, source_file, ref_fps)
 
 
 def calculate_video_playouts(video_results):
