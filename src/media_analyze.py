@@ -6,6 +6,7 @@
 import numpy as np
 import pandas as pd
 import os
+import json
 
 import audio_parse
 import media_parse
@@ -805,6 +806,41 @@ def video_latency_function(**kwargs):
             print("Warning. No video latency results")
 
 
+def avsync_stats_function(avsync_results, output_stats):
+    """
+    Calculate and write A/V sync statistics to JSON file.
+
+    Args:
+        avsync_results: DataFrame containing A/V sync analysis results with 'avsync_sec' column
+        output_stats: Path to output JSON file for statistics
+    """
+    if avsync_results is None or len(avsync_results) == 0:
+        print("No avsync results to write statistics")
+        return
+
+    # Calculate statistics
+    avsync_sec_average = np.average(avsync_results["avsync_sec"])
+    avsync_sec_stddev = np.std(avsync_results["avsync_sec"])
+    avsync_sec_p50 = np.percentile(avsync_results["avsync_sec"], 50)
+    avsync_sec_p90 = np.percentile(avsync_results["avsync_sec"], 90)
+
+    # Write statistics to JSON file if output_stats is provided
+    if output_stats:
+        stats = {
+            "avsync": {
+                "avsync_sec": {
+                    "average": float(avsync_sec_average),
+                    "stddev": float(avsync_sec_stddev),
+                    "p50": float(avsync_sec_p50),
+                    "p90": float(avsync_sec_p90),
+                    "size": len(avsync_results),
+                }
+            }
+        }
+        with open(output_stats, "w") as f:
+            json.dump(stats, f, indent=2)
+
+
 def avsync_function(**kwargs):
     audio_results = kwargs.get("audio_results")
     video_results = kwargs.get("video_results")
@@ -813,6 +849,7 @@ def avsync_function(**kwargs):
     debug = kwargs.get("debug")
     z_filter = kwargs.get("z_filter")
     outfile = kwargs.get("outfile")
+    output_stats = kwargs.get("output_stats")
     video_smoothed = kwargs.get("video_smoothed", False)
 
     # av sync is the time from the signal until the video is shown
@@ -863,15 +900,9 @@ def avsync_function(**kwargs):
     if len(avsync_results) > 0:
         avsync_results.to_csv(outfile, index=False)
 
-    # print statistics
-    avsync_sec_average = np.average(avsync_results["avsync_sec"])
-    avsync_sec_stddev = np.std(avsync_results["avsync_sec"])
-    avsync_sec_p50 = np.percentile(avsync_results["avsync_sec"], 50)
-    avsync_sec_p90 = np.percentile(avsync_results["avsync_sec"], 90)
-
-    print(
-        f"avsync_sec average: {avsync_sec_average:.3f} stddev: {avsync_sec_stddev:.3f} p50: {avsync_sec_p50:.3f} p90: {avsync_sec_p90:.3f} size: {len(avsync_results)}"
-    )
+    # calculate and write statistics
+    if output_stats is not None:
+        avsync_stats_function(avsync_results, output_stats)
 
 
 def calculate_video_playouts(video_results):
@@ -1040,6 +1071,7 @@ def media_analyze(
     input_video,
     input_audio,
     outfile,
+    output_stats,
     force_fps,
     audio_offset,
     filter_all_echoes,
@@ -1097,6 +1129,7 @@ def media_analyze(
         beep_period_sec=beep_period_sec,
         debug=debug,
         outfile=outfile,
+        output_stats=output_stats,
         z_filter=z_filter,
         windowed_stats_sec=windowed_stats_sec,
         input_video=input_video,

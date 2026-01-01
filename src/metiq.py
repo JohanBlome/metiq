@@ -61,6 +61,7 @@ default_values = {
     "outfile": None,
     "output_audio": None,
     "output_video": None,
+    "output_stats": None,
     "audio_offset": 0,
     "windowed_stats_sec": 1,
     "lock_layout": False,
@@ -330,6 +331,17 @@ input_args = {
             "type": str,
             "help": "Output video parsed csv file",
             "default": default_values["output_video"],
+        },
+    },
+    "output_stats": {
+        "func": ANALYZE,
+        "short": "",
+        "long": "--output-stats",
+        "dest": "output_stats",
+        "args": {
+            "type": str,
+            "help": "Output JSON file for analysis statistics",
+            "default": default_values["output_stats"],
         },
     },
     "no_hw_decode": {
@@ -743,6 +755,7 @@ def main(argv):
             input_video=options.input_video,
             input_audio=options.input_audio,
             outfile=options.outfile,
+            output_stats=options.output_stats,
             force_fps=options.force_fps,
             audio_offset=options.audio_offset,
             filter_all_echoes=options.filter_all_echoes,
