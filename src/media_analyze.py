@@ -17,6 +17,45 @@ import time
 import sys
 
 
+# Global thresholds for audio and A/V sync quality analysis
+THRESHOLDS = {
+    "audio": {
+        "acceleration_threshold_ms_per_sec": 1,  # 1ms/sec clock error (300ms in 5 min)
+        "total_wrong_speed_threshold_ms": 100,  # 100ms total drift (ITU-R detectable range)
+        "jitter_threshold_ms": 30,  # 30ms jitter (stddev)
+        "sudden_jump_threshold_ms": 100,  # 100ms jump (>3% of 3sec period)
+        "missing_beeps_percentage_threshold": 5.0,  # >5% missing is a warning
+    },
+    "avsync": {
+        # ITU-R BT.1359-1 standard thresholds (independent of frame rate)
+        "itu_r_detectable_min_ms": -125,
+        "itu_r_detectable_max_ms": 45,
+        "itu_r_acceptable_min_ms": -185,
+        "itu_r_acceptable_max_ms": 90,
+        # Drift thresholds
+        "drift_rate_threshold_ms_per_sec": 10,  # 10ms/sec is noticeable
+        "drift_total_threshold_ms": 50,  # 50ms total drift is significant
+        # Jitter/variance threshold (frame-rate aware)
+        "jitter_base_threshold_ms": 30,  # Base: at least 30ms
+        # Sudden jump threshold (frame-rate aware): Must be > 1 frame time
+        "sudden_jump_frame_multiplier": 2.0,  # Multiplier: 2 frame times
+        # Periodic oscillation: Autocorrelation strength threshold
+        "oscillation_correlation_threshold": 0.5,  # Require strong correlation
+        "oscillation_min_period": 5,  # Ignore very short periods (likely noise)
+        # Non-monotonic drift: Require significant slope changes
+        "drift_direction_min_slope": 0.001,  # Minimum slope (1ms per sample)
+        # Outlier detection: IQR multiplier
+        "outlier_iqr_multiplier": 1.5,  # Standard IQR outlier detection
+        "outlier_percentage_threshold": 5.0,  # Flag if >5% are outliers
+        # Temporal segmentation (frame-rate aware)
+        "temporal_avg_change_base_ms": 50,  # Base: 50ms
+        "temporal_avg_change_frame_multiplier": 1.5,  # Multiplier: 1.5 frames
+        "temporal_std_change_base_ms": 20,  # Base: 20ms
+        "temporal_std_change_frame_multiplier": 1.0,  # Multiplier: 1 frame
+    },
+}
+
+
 def calculate_value_read_smoothed(video_results, ref_fps=30):
     """
     Calculate smoothed value_read, only correcting frames with reading errors.
@@ -807,7 +846,190 @@ def video_latency_function(**kwargs):
             print("Warning. No video latency results")
 
 
-def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fps=30.0):
+def audio_stats_function(
+    audio_results,
+    output_stats,
+    source_file=None,
+    beep_period_sec=3.0,
+    total_duration_sec=None,
+):
+    """
+    Calculate and write audio quality statistics to JSON file.
+
+    Args:
+        audio_results: DataFrame containing audio beep detection results with columns:
+                       'audio_sample', 'timestamp', 'correlation'
+        output_stats: Path to output JSON file for statistics
+        source_file: Optional source filename for reference in JSON output
+        beep_period_sec: Expected period between beeps in seconds (default 3.0)
+        total_duration_sec: Total audio duration in seconds (for missing beeps detection)
+    """
+    if audio_results is None or len(audio_results) == 0:
+        print("No audio results to write statistics")
+        return None
+
+    # Calculate inter-beep spacing
+    timestamps = audio_results["timestamp"].values
+    inter_beep_spacing = np.diff(timestamps)
+
+    # Basic statistics
+    spacing_average = np.mean(inter_beep_spacing)
+    spacing_stddev = np.std(inter_beep_spacing)
+    spacing_min = np.min(inter_beep_spacing)
+    spacing_max = np.max(inter_beep_spacing)
+
+    # Correlation statistics
+    correlation_average = np.mean(audio_results["correlation"])
+    correlation_min = np.min(audio_results["correlation"])
+
+    issues = []
+    issue_details = {}
+
+    # 1. Wrong speed detection - clock rate error
+    # Calculate deviation from expected spacing
+    spacing_deviation_sec = beep_period_sec - spacing_average
+
+    # Calculate acceleration rate as fractional clock error
+    acceleration_rate = spacing_deviation_sec / beep_period_sec
+
+    # Convert to acceleration in ms/sec (how much audio clock drifts per second of playback)
+    acceleration_ms_per_sec = acceleration_rate * 1000
+
+    # Calculate total duration and total clock error
+    total_duration_sec = len(inter_beep_spacing) * beep_period_sec
+    total_wrong_speed_ms = acceleration_ms_per_sec * total_duration_sec
+
+    if (
+        abs(acceleration_ms_per_sec)
+        > THRESHOLDS["audio"]["acceleration_threshold_ms_per_sec"]
+        or abs(total_wrong_speed_ms)
+        > THRESHOLDS["audio"]["total_wrong_speed_threshold_ms"]
+    ):
+        issues.append("wrong_speed")
+        issue_details["wrong_speed"] = {
+            "total_duration_sec": float(total_duration_sec),
+            "num_beeps": len(audio_results),
+            "expected_spacing_sec": beep_period_sec,
+            "actual_avg_spacing_sec": float(spacing_average),
+            "acceleration_rate": float(acceleration_rate),
+            "acceleration_ms_per_sec": float(acceleration_ms_per_sec),
+            "threshold_acceleration_ms_per_sec": THRESHOLDS["audio"][
+                "acceleration_threshold_ms_per_sec"
+            ],
+            "total_wrong_speed_ms": float(total_wrong_speed_ms),
+            "threshold_total_wrong_speed_ms": THRESHOLDS["audio"][
+                "total_wrong_speed_threshold_ms"
+            ],
+            "description": "Audio clock running at wrong speed",
+        }
+
+    # 2. High jitter
+    jitter_ms = spacing_stddev * 1000
+    if jitter_ms > THRESHOLDS["audio"]["jitter_threshold_ms"]:
+        issues.append("high_jitter")
+        issue_details["high_jitter"] = {
+            "stddev_ms": float(jitter_ms),
+            "threshold_ms": THRESHOLDS["audio"]["jitter_threshold_ms"],
+            "description": "High variance in inter-beep timing indicating unstable audio",
+        }
+
+    # 3. Sudden jumps in inter-beep spacing
+    if len(inter_beep_spacing) > 1:
+        spacing_diff = np.diff(inter_beep_spacing)
+        jump_threshold_sec = THRESHOLDS["audio"]["sudden_jump_threshold_ms"] / 1000.0
+
+        large_jumps = np.abs(spacing_diff) > jump_threshold_sec
+        num_jumps = large_jumps.sum()
+
+        if num_jumps > 0:
+            issues.append("sudden_jumps")
+            jump_indices = np.where(large_jumps)[0]
+
+            # Report jump locations
+            jump_details = []
+            for idx in jump_indices[:10]:  # First 10 only
+                jump_info = {
+                    "beep_index": int(idx + 1),  # Index of beep after jump
+                    "timestamp_sec": float(timestamps[idx + 1]),
+                    "jump_magnitude_ms": float(abs(spacing_diff[idx]) * 1000),
+                }
+                jump_details.append(jump_info)
+
+            issue_details["sudden_jumps"] = {
+                "count": int(num_jumps),
+                "max_jump_ms": float(np.max(np.abs(spacing_diff)) * 1000),
+                "jump_locations": jump_details,
+                "threshold_ms": THRESHOLDS["audio"]["sudden_jump_threshold_ms"],
+                "description": "Discontinuous jumps in inter-beep timing",
+            }
+
+    # 4. Missing beeps (warning)
+    if total_duration_sec:
+        expected_beeps = int(total_duration_sec / beep_period_sec)
+        actual_beeps = len(audio_results)
+        missing_beeps = expected_beeps - actual_beeps
+        missing_percentage = (
+            (missing_beeps / expected_beeps * 100) if expected_beeps > 0 else 0
+        )
+
+        if (
+            missing_percentage
+            > THRESHOLDS["audio"]["missing_beeps_percentage_threshold"]
+        ):
+            issues.append("missing_beeps")
+            issue_details["missing_beeps"] = {
+                "expected_beeps": expected_beeps,
+                "actual_beeps": actual_beeps,
+                "missing_count": missing_beeps,
+                "missing_percentage": float(missing_percentage),
+                "threshold_percentage": THRESHOLDS["audio"][
+                    "missing_beeps_percentage_threshold"
+                ],
+                "description": "Beeps not detected, possibly due to dropouts or detection failures",
+            }
+
+    # Separate into errors and warnings
+    warning_types = {"missing_beeps"}
+    errors = [issue for issue in issues if issue not in warning_types]
+    warnings = [issue for issue in issues if issue in warning_types]
+
+    error_details = {k: v for k, v in issue_details.items() if k not in warning_types}
+    warning_details = {k: v for k, v in issue_details.items() if k in warning_types}
+
+    # Generate summary
+    if len(errors) == 0 and len(warnings) == 0:
+        summary = "ok"
+    else:
+        summary = errors + warnings
+
+    # Return statistics dictionary (will be added to main stats)
+    return {
+        "summary": summary,
+        "inter_beep_spacing_sec": {
+            "average": float(spacing_average),
+            "stddev": float(spacing_stddev),
+            "min": float(spacing_min),
+            "max": float(spacing_max),
+            "expected": beep_period_sec,
+            "size": len(inter_beep_spacing),
+        },
+        "correlation": {
+            "average": float(correlation_average),
+            "min": float(correlation_min),
+        },
+        "errors": error_details,
+        "warnings": warning_details,
+    }
+
+
+def avsync_stats_function(
+    avsync_results,
+    output_stats,
+    source_file=None,
+    ref_fps=30.0,
+    audio_results=None,
+    beep_period_sec=3.0,
+):
     """
     Calculate and write A/V sync statistics to JSON file.
 
@@ -841,44 +1063,53 @@ def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fp
     issues = []
     issue_details = {}
 
-    # Define all thresholds explicitly with rationale
+    # Use global thresholds and calculate frame-rate aware values
     # Note: Video quantization introduces ±0.5 frame time error inherently
-    THRESHOLDS = {
-        # ITU-R BT.1359-1 standard thresholds (independent of frame rate)
-        "itu_r_detectable_min_ms": -125,
-        "itu_r_detectable_max_ms": 45,
-        "itu_r_acceptable_min_ms": -185,
-        "itu_r_acceptable_max_ms": 90,
-        # Drift thresholds
-        "drift_rate_threshold_ms_per_sec": 10,  # 10ms/sec is noticeable
-        "drift_total_threshold_ms": 50,  # 50ms total drift is significant
-        # Jitter/variance threshold
-        "jitter_threshold_ms": max(30, frame_time_ms),  # At least 30ms or 1 frame
-        # Sudden jump threshold: Must be > 1 frame time to account for quantization
-        "sudden_jump_threshold_ms": frame_time_ms * 2.0,  # 2 frame times
-        # Periodic oscillation: Autocorrelation strength threshold
-        "oscillation_correlation_threshold": 0.5,  # Require strong correlation
-        "oscillation_min_period": 5,  # Ignore very short periods (likely noise)
-        # Non-monotonic drift: Require significant slope changes
-        "drift_direction_min_slope": 0.001,  # Minimum slope to consider a direction (1ms per sample)
-        # Outlier detection: IQR multiplier
-        "outlier_iqr_multiplier": 1.5,  # Standard IQR outlier detection
-        "outlier_percentage_threshold": 5.0,  # Flag if >5% are outliers
-        # Temporal segmentation: Changes between time segments
+    thresholds = {
+        # Frame-rate independent thresholds from global config
+        "itu_r_detectable_min_ms": THRESHOLDS["avsync"]["itu_r_detectable_min_ms"],
+        "itu_r_detectable_max_ms": THRESHOLDS["avsync"]["itu_r_detectable_max_ms"],
+        "itu_r_acceptable_min_ms": THRESHOLDS["avsync"]["itu_r_acceptable_min_ms"],
+        "itu_r_acceptable_max_ms": THRESHOLDS["avsync"]["itu_r_acceptable_max_ms"],
+        "drift_rate_threshold_ms_per_sec": THRESHOLDS["avsync"][
+            "drift_rate_threshold_ms_per_sec"
+        ],
+        "drift_total_threshold_ms": THRESHOLDS["avsync"]["drift_total_threshold_ms"],
+        "oscillation_correlation_threshold": THRESHOLDS["avsync"][
+            "oscillation_correlation_threshold"
+        ],
+        "oscillation_min_period": THRESHOLDS["avsync"]["oscillation_min_period"],
+        "drift_direction_min_slope": THRESHOLDS["avsync"]["drift_direction_min_slope"],
+        "outlier_iqr_multiplier": THRESHOLDS["avsync"]["outlier_iqr_multiplier"],
+        "outlier_percentage_threshold": THRESHOLDS["avsync"][
+            "outlier_percentage_threshold"
+        ],
+        # Frame-rate aware thresholds (calculated from base values)
+        "jitter_threshold_ms": max(
+            THRESHOLDS["avsync"]["jitter_base_threshold_ms"], frame_time_ms
+        ),
+        "sudden_jump_threshold_ms": frame_time_ms
+        * THRESHOLDS["avsync"]["sudden_jump_frame_multiplier"],
         "temporal_avg_change_threshold_ms": max(
-            50, frame_time_ms * 1.5
-        ),  # 50ms or 1.5 frames
-        "temporal_std_change_threshold_ms": max(20, frame_time_ms),  # 20ms or 1 frame
+            THRESHOLDS["avsync"]["temporal_avg_change_base_ms"],
+            frame_time_ms
+            * THRESHOLDS["avsync"]["temporal_avg_change_frame_multiplier"],
+        ),
+        "temporal_std_change_threshold_ms": max(
+            THRESHOLDS["avsync"]["temporal_std_change_base_ms"],
+            frame_time_ms
+            * THRESHOLDS["avsync"]["temporal_std_change_frame_multiplier"],
+        ),
     }
 
     # 1. ITU-R BT.1359-1 threshold violations
     detectable_violations = (
-        (avsync_ms < THRESHOLDS["itu_r_detectable_min_ms"])
-        | (avsync_ms > THRESHOLDS["itu_r_detectable_max_ms"])
+        (avsync_ms < thresholds["itu_r_detectable_min_ms"])
+        | (avsync_ms > thresholds["itu_r_detectable_max_ms"])
     ).sum()
     acceptable_violations = (
-        (avsync_ms < THRESHOLDS["itu_r_acceptable_min_ms"])
-        | (avsync_ms > THRESHOLDS["itu_r_acceptable_max_ms"])
+        (avsync_ms < thresholds["itu_r_acceptable_min_ms"])
+        | (avsync_ms > thresholds["itu_r_acceptable_max_ms"])
     ).sum()
 
     if acceptable_violations > 0:
@@ -887,8 +1118,8 @@ def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fp
             "count": int(acceptable_violations),
             "percentage": float(acceptable_violations / len(avsync_results) * 100),
             "threshold_range_ms": [
-                THRESHOLDS["itu_r_acceptable_min_ms"],
-                THRESHOLDS["itu_r_acceptable_max_ms"],
+                thresholds["itu_r_acceptable_min_ms"],
+                thresholds["itu_r_acceptable_max_ms"],
             ],
             "actual_min_ms": float(avsync_sec_min * 1000),
             "actual_max_ms": float(avsync_sec_max * 1000),
@@ -900,8 +1131,8 @@ def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fp
             "count": int(detectable_violations),
             "percentage": float(detectable_violations / len(avsync_results) * 100),
             "threshold_range_ms": [
-                THRESHOLDS["itu_r_detectable_min_ms"],
-                THRESHOLDS["itu_r_detectable_max_ms"],
+                thresholds["itu_r_detectable_min_ms"],
+                thresholds["itu_r_detectable_max_ms"],
             ],
             "actual_min_ms": float(avsync_sec_min * 1000),
             "actual_max_ms": float(avsync_sec_max * 1000),
@@ -923,8 +1154,8 @@ def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fp
         total_drift_ms = drift_rate_ms_per_sec * time_span
 
         if (
-            abs(drift_rate_ms_per_sec) > THRESHOLDS["drift_rate_threshold_ms_per_sec"]
-            or abs(total_drift_ms) > THRESHOLDS["drift_total_threshold_ms"]
+            abs(drift_rate_ms_per_sec) > thresholds["drift_rate_threshold_ms_per_sec"]
+            or abs(total_drift_ms) > thresholds["drift_total_threshold_ms"]
         ):
             issues.append("drift")
             issue_details["drift"] = {
@@ -933,28 +1164,28 @@ def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fp
                 "time_span_sec": float(time_span),
                 "actual_min_ms": float(avsync_sec_min * 1000),
                 "actual_max_ms": float(avsync_sec_max * 1000),
-                "threshold_rate_ms_per_sec": THRESHOLDS[
+                "threshold_rate_ms_per_sec": thresholds[
                     "drift_rate_threshold_ms_per_sec"
                 ],
-                "threshold_total_ms": THRESHOLDS["drift_total_threshold_ms"],
+                "threshold_total_ms": thresholds["drift_total_threshold_ms"],
                 "description": "Linear clock drift between audio and video over time",
             }
 
     # 3. High jitter/variance
     jitter_ms = avsync_sec_stddev * 1000
 
-    if jitter_ms > THRESHOLDS["jitter_threshold_ms"]:
+    if jitter_ms > thresholds["jitter_threshold_ms"]:
         issues.append("high_jitter")
         issue_details["high_jitter"] = {
             "stddev_ms": float(jitter_ms),
-            "threshold_ms": THRESHOLDS["jitter_threshold_ms"],
+            "threshold_ms": thresholds["jitter_threshold_ms"],
             "description": "High variance in A/V sync measurements indicating unstable synchronization",
         }
 
     # 4. Sudden jumps/discontinuities
     if len(avsync_results) > 1:
         avsync_diff = np.diff(avsync_results["avsync_sec"].values)
-        jump_threshold_sec = THRESHOLDS["sudden_jump_threshold_ms"] / 1000.0
+        jump_threshold_sec = thresholds["sudden_jump_threshold_ms"] / 1000.0
 
         large_jumps = np.abs(avsync_diff) > jump_threshold_sec
         num_jumps = large_jumps.sum()
@@ -1019,7 +1250,7 @@ def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fp
                         np.max(np.abs(avsync_diff[valid_jumps])) * 1000
                     ),
                     "jump_locations": jump_details,
-                    "threshold_ms": THRESHOLDS["sudden_jump_threshold_ms"],
+                    "threshold_ms": thresholds["sudden_jump_threshold_ms"],
                     "frame_time_ms": frame_time_ms,
                     "description": "Discontinuous jumps in A/V sync greater than 2 frame times",
                 }
@@ -1066,11 +1297,11 @@ def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fp
             # Find local maxima in first half of autocorrelation
             search_range = min(len(autocorr) // 2, 50)
             local_max_indices = []
-            for i in range(THRESHOLDS["oscillation_min_period"], search_range):
+            for i in range(thresholds["oscillation_min_period"], search_range):
                 if (
                     autocorr[i] > autocorr[i - 1]
                     and autocorr[i] > autocorr[i + 1]
-                    and autocorr[i] > THRESHOLDS["oscillation_correlation_threshold"]
+                    and autocorr[i] > thresholds["oscillation_correlation_threshold"]
                 ):
                     local_max_indices.append(i)
 
@@ -1079,10 +1310,10 @@ def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fp
                 issue_details["periodic_oscillation"] = {
                     "peak_periods_samples": local_max_indices[:5],  # First 5 periods
                     "autocorrelation_strength": float(autocorr[local_max_indices[0]]),
-                    "threshold_correlation": THRESHOLDS[
+                    "threshold_correlation": thresholds[
                         "oscillation_correlation_threshold"
                     ],
-                    "min_period_samples": THRESHOLDS["oscillation_min_period"],
+                    "min_period_samples": thresholds["oscillation_min_period"],
                     "description": "Regular periodic pattern in A/V sync drift",
                 }
 
@@ -1098,7 +1329,7 @@ def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fp
             x = np.arange(len(window))
             slope = np.polyfit(x, window, 1)[0]
             # Only count as a direction if slope is significant
-            if abs(slope) > THRESHOLDS["drift_direction_min_slope"]:
+            if abs(slope) > thresholds["drift_direction_min_slope"]:
                 drift_directions.append(1 if slope > 0 else -1)
             else:
                 drift_directions.append(0)  # No significant drift
@@ -1118,7 +1349,7 @@ def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fp
                 issue_details["non_monotonic_drift"] = {
                     "direction_changes": direction_changes,
                     "num_segments": len(drift_directions),
-                    "min_slope_threshold": THRESHOLDS["drift_direction_min_slope"],
+                    "min_slope_threshold": thresholds["drift_direction_min_slope"],
                     "description": "Drift direction changes over time (audio catching up then falling behind)",
                 }
 
@@ -1137,8 +1368,8 @@ def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fp
         std_change_ms = abs(last_std - first_std) * 1000
 
         if (
-            avg_change_ms > THRESHOLDS["temporal_avg_change_threshold_ms"]
-            or std_change_ms > THRESHOLDS["temporal_std_change_threshold_ms"]
+            avg_change_ms > thresholds["temporal_avg_change_threshold_ms"]
+            or std_change_ms > thresholds["temporal_std_change_threshold_ms"]
         ):
             issues.append("temporal_segmentation")
             issue_details["temporal_segmentation"] = {
@@ -1148,10 +1379,10 @@ def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fp
                 "first_third_std_ms": float(first_std * 1000),
                 "last_third_std_ms": float(last_std * 1000),
                 "std_change_ms": float(std_change_ms),
-                "threshold_avg_change_ms": THRESHOLDS[
+                "threshold_avg_change_ms": thresholds[
                     "temporal_avg_change_threshold_ms"
                 ],
-                "threshold_std_change_ms": THRESHOLDS[
+                "threshold_std_change_ms": thresholds[
                     "temporal_std_change_threshold_ms"
                 ],
                 "description": "Significant change in A/V sync behavior between beginning and end of recording",
@@ -1162,8 +1393,8 @@ def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fp
     q3 = np.percentile(avsync_results["avsync_sec"], 75)
     iqr = q3 - q1
 
-    lower_bound = q1 - THRESHOLDS["outlier_iqr_multiplier"] * iqr
-    upper_bound = q3 + THRESHOLDS["outlier_iqr_multiplier"] * iqr
+    lower_bound = q1 - thresholds["outlier_iqr_multiplier"] * iqr
+    upper_bound = q3 + thresholds["outlier_iqr_multiplier"] * iqr
 
     outliers = (avsync_results["avsync_sec"] < lower_bound) | (
         avsync_results["avsync_sec"] > upper_bound
@@ -1171,14 +1402,14 @@ def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fp
     num_outliers = outliers.sum()
     outlier_percentage = num_outliers / len(avsync_results) * 100
 
-    if outlier_percentage > THRESHOLDS["outlier_percentage_threshold"]:
+    if outlier_percentage > thresholds["outlier_percentage_threshold"]:
         issues.append("outliers")
         issue_details["outliers"] = {
             "count": int(num_outliers),
             "percentage": float(outlier_percentage),
             "iqr_bounds_ms": [float(lower_bound * 1000), float(upper_bound * 1000)],
-            "iqr_multiplier": THRESHOLDS["outlier_iqr_multiplier"],
-            "percentage_threshold": THRESHOLDS["outlier_percentage_threshold"],
+            "iqr_multiplier": thresholds["outlier_iqr_multiplier"],
+            "percentage_threshold": thresholds["outlier_percentage_threshold"],
             "description": "Statistical outliers in A/V sync measurements using IQR method",
         }
 
@@ -1215,6 +1446,24 @@ def avsync_stats_function(avsync_results, output_stats, source_file=None, ref_fp
                 "warnings": warning_details,
             }
         }
+
+        # Add audio statistics if audio_results is provided
+        if audio_results is not None and len(audio_results) > 0:
+            # Calculate total duration from audio timestamps
+            total_duration_sec = (
+                audio_results["timestamp"].max() if len(audio_results) > 0 else None
+            )
+
+            audio_stats = audio_stats_function(
+                audio_results,
+                output_stats,
+                source_file,
+                beep_period_sec,
+                total_duration_sec,
+            )
+
+            if audio_stats:
+                stats["audio"] = audio_stats
 
         # Add source file as first entry if provided
         if source_file:
@@ -1316,7 +1565,14 @@ def avsync_function(**kwargs):
             else:
                 source_file = base
 
-        avsync_stats_function(avsync_results, output_stats, source_file, ref_fps)
+        avsync_stats_function(
+            avsync_results,
+            output_stats,
+            source_file,
+            ref_fps,
+            audio_results,
+            beep_period_sec,
+        )
 
 
 def calculate_video_playouts(video_results):
