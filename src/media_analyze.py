@@ -26,6 +26,14 @@ THRESHOLDS = {
         "sudden_jump_threshold_ms": 100,  # 100ms jump (>3% of 3sec period)
         "missing_beeps_percentage_threshold": 5.0,  # >5% missing is a warning
     },
+    "video": {
+        "frame_drops_percentage_threshold": 1.0,  # >1% dropped frames is a warning
+        "frame_duplicates_percentage_threshold": 0.5,  # >0.5% duplicates is an error
+        "timing_jitter_threshold_multiplier": 0.15,  # Jitter stddev > 15% of mean spacing
+        "vft_read_errors_percentage_threshold": 5.0,  # >5% read errors is a warning
+        "frame_rate_variation_threshold_fps": 2.0,  # >2 fps variation indicates inconsistency
+        "frame_rate_window_sec": 1.0,  # Window for frame rate calculation
+    },
     "avsync": {
         # ITU-R BT.1359-1 standard thresholds (independent of frame rate)
         "itu_r_detectable_min_ms": -125,
@@ -1022,6 +1030,228 @@ def audio_stats_function(
     }
 
 
+def video_stats_function(
+    avsync_results,
+    output_stats,
+    source_file=None,
+    ref_fps=30.0,
+):
+    """
+    Calculate and write video quality statistics to JSON file.
+
+    Args:
+        avsync_results: DataFrame containing avsync analysis results with columns:
+                        'frame_num', 'video_timestamp', 'audio_timestamp',
+                        'video_value_read', 'video_value_read_smoothed', 'avsync_sec'
+        output_stats: Path to output JSON file for statistics
+        source_file: Optional source filename for reference in JSON output
+        ref_fps: Reference frame rate (default 30.0)
+    """
+    if avsync_results is None or len(avsync_results) == 0:
+        print("No avsync results to write video statistics")
+        return None
+
+    # Calculate frame time for reference
+    frame_time_ms = (1000.0 / ref_fps) if ref_fps > 0 else 33.33
+
+    issues = []
+    issue_details = {}
+
+    # Clean data - only work with successfully read frames (where video_value_read_smoothed is not NaN)
+    valid_frames = avsync_results.dropna(subset=["video_value_read_smoothed"])
+    total_frames = len(avsync_results)
+    valid_count = len(valid_frames)
+
+    if valid_count == 0:
+        return {
+            "summary": ["no_valid_frames"],
+            "errors": {
+                "no_valid_frames": {
+                    "description": "No valid VFT frames could be read from the video"
+                }
+            },
+            "warnings": {},
+        }
+
+    # 1. VFT Read Errors (WARNING) - frames where video_value_read is NaN
+    read_errors = avsync_results["video_value_read"].isna().sum()
+    read_error_percentage = (read_errors / total_frames) * 100
+
+    if (
+        read_error_percentage
+        > THRESHOLDS["video"]["vft_read_errors_percentage_threshold"]
+    ):
+        issues.append("vft_read_errors")
+        issue_details["vft_read_errors"] = {
+            "error_count": int(read_errors),
+            "total_frames": int(total_frames),
+            "error_percentage": float(read_error_percentage),
+            "threshold_percentage": THRESHOLDS["video"][
+                "vft_read_errors_percentage_threshold"
+            ],
+            "description": "High percentage of VFT barcode read failures indicating capture quality issues",
+        }
+
+    # 2. Frame Duplicates (ERROR) - consecutive identical value_read values
+    value_read_values = valid_frames["video_value_read_smoothed"].values
+    frame_differences = np.diff(value_read_values)
+
+    duplicates = (frame_differences == 0).sum()
+    duplicate_percentage = (
+        (duplicates / (valid_count - 1)) * 100 if valid_count > 1 else 0
+    )
+
+    if (
+        duplicate_percentage
+        > THRESHOLDS["video"]["frame_duplicates_percentage_threshold"]
+    ):
+        # Find duplicate runs
+        duplicate_runs = []
+        current_run = 0
+        for i, diff in enumerate(frame_differences):
+            if diff == 0:
+                current_run += 1
+            else:
+                if current_run > 0:
+                    duplicate_runs.append(
+                        {
+                            "frame_num": int(valid_frames.iloc[i]["frame_num"]),
+                            "value_read": int(value_read_values[i]),
+                            "run_length": current_run + 1,  # +1 for the original frame
+                        }
+                    )
+                current_run = 0
+        if current_run > 0:  # Handle last run
+            duplicate_runs.append(
+                {
+                    "frame_num": int(valid_frames.iloc[-1]["frame_num"]),
+                    "value_read": int(value_read_values[-1]),
+                    "run_length": current_run + 1,
+                }
+            )
+
+        issues.append("frame_duplicates")
+        issue_details["frame_duplicates"] = {
+            "duplicate_count": int(duplicates),
+            "duplicate_percentage": float(duplicate_percentage),
+            "max_run_length": (
+                int(max([r["run_length"] for r in duplicate_runs]))
+                if duplicate_runs
+                else 0
+            ),
+            "duplicate_runs": duplicate_runs[:10],  # First 10 runs
+            "threshold_percentage": THRESHOLDS["video"][
+                "frame_duplicates_percentage_threshold"
+            ],
+            "description": "Same VFT frame shown multiple times consecutively",
+        }
+
+    # 3. Frame Timing Jitter (ERROR)
+    if "video_timestamp" in valid_frames.columns and len(valid_frames) > 1:
+        timestamps = valid_frames["video_timestamp"].values
+        inter_frame_times = np.diff(timestamps)
+
+        # Calculate jitter as stddev of inter-frame times
+        mean_inter_frame_sec = np.mean(inter_frame_times)
+        jitter_sec = np.std(inter_frame_times)
+
+        mean_inter_frame_ms = mean_inter_frame_sec * 1000
+        jitter_ms = jitter_sec * 1000
+
+        # For avsync data, frames are sampled at beep intervals (~3000ms for 3sec spacing)
+        # not at frame rate intervals (~33ms). Use percentage of mean spacing as threshold.
+        jitter_threshold_percentage = THRESHOLDS["video"][
+            "timing_jitter_threshold_multiplier"
+        ]
+        jitter_threshold_ms = mean_inter_frame_ms * jitter_threshold_percentage
+
+        if jitter_ms > jitter_threshold_ms:
+            issues.append("timing_jitter")
+            issue_details["timing_jitter"] = {
+                "jitter_stddev_ms": float(jitter_ms),
+                "mean_inter_frame_ms": float(mean_inter_frame_ms),
+                "threshold_ms": float(jitter_threshold_ms),
+                "threshold_percentage": float(jitter_threshold_percentage * 100),
+                "description": "High variance in frame presentation timing indicating poor vsync or timing stability",
+            }
+
+    # 4. Frame Rate Consistency (ERROR)
+    if "video_timestamp" in valid_frames.columns and len(valid_frames) > ref_fps:
+        window_sec = THRESHOLDS["video"]["frame_rate_window_sec"]
+        frame_rates = []
+
+        # Calculate frame rate in sliding windows
+        for i in range(len(valid_frames)):
+            start_time = valid_frames.iloc[i]["video_timestamp"]
+            end_time = start_time + window_sec
+
+            # Count frames in this window
+            frames_in_window = valid_frames[
+                (valid_frames["video_timestamp"] >= start_time)
+                & (valid_frames["video_timestamp"] < end_time)
+            ]
+
+            if len(frames_in_window) > 1:
+                actual_duration = (
+                    frames_in_window.iloc[-1]["video_timestamp"]
+                    - frames_in_window.iloc[0]["video_timestamp"]
+                )
+                if actual_duration > 0:
+                    fps = (len(frames_in_window) - 1) / actual_duration
+                    frame_rates.append(fps)
+
+        if len(frame_rates) > 0:
+            fps_mean = np.mean(frame_rates)
+            fps_stddev = np.std(frame_rates)
+            fps_min = np.min(frame_rates)
+            fps_max = np.max(frame_rates)
+            fps_variation = fps_max - fps_min
+
+            if (
+                fps_variation
+                > THRESHOLDS["video"]["frame_rate_variation_threshold_fps"]
+            ):
+                issues.append("frame_rate_inconsistency")
+                issue_details["frame_rate_inconsistency"] = {
+                    "mean_fps": float(fps_mean),
+                    "stddev_fps": float(fps_stddev),
+                    "min_fps": float(fps_min),
+                    "max_fps": float(fps_max),
+                    "variation_fps": float(fps_variation),
+                    "expected_fps": float(ref_fps),
+                    "threshold_variation_fps": THRESHOLDS["video"][
+                        "frame_rate_variation_threshold_fps"
+                    ],
+                    "description": "Frame rate varies significantly over time indicating VRR or encoding issues",
+                }
+
+    # Separate into errors and warnings
+    warning_types = {"frame_drops", "vft_read_errors"}
+    errors = [issue for issue in issues if issue not in warning_types]
+    warnings = [issue for issue in issues if issue in warning_types]
+
+    error_details = {k: v for k, v in issue_details.items() if k not in warning_types}
+    warning_details = {k: v for k, v in issue_details.items() if k in warning_types}
+
+    # Generate summary
+    if len(errors) == 0 and len(warnings) == 0:
+        summary = "ok"
+    else:
+        summary = errors + warnings
+
+    return {
+        "summary": summary,
+        "frame_info": {
+            "total_frames": int(total_frames),
+            "valid_frames": int(valid_count),
+            "expected_fps": float(ref_fps),
+            "frame_time_ms": float(frame_time_ms),
+        },
+        "errors": error_details,
+        "warnings": warning_details,
+    }
+
+
 def avsync_stats_function(
     avsync_results,
     output_stats,
@@ -1035,10 +1265,13 @@ def avsync_stats_function(
 
     Args:
         avsync_results: DataFrame containing A/V sync analysis results with columns:
-                        'avsync_sec', 'video_timestamp', 'audio_timestamp'
+                        'avsync_sec', 'video_timestamp', 'audio_timestamp',
+                        'video_value_read', 'video_value_read_smoothed'
         output_stats: Path to output JSON file for statistics
         source_file: Optional source filename for reference in JSON output
         ref_fps: Reference frame rate (default 30.0) for quantization-aware thresholds
+        audio_results: Optional DataFrame containing audio beep detection results
+        beep_period_sec: Expected spacing between audio beeps (default 3.0)
     """
     if avsync_results is None or len(avsync_results) == 0:
         print("No avsync results to write statistics")
@@ -1464,6 +1697,18 @@ def avsync_stats_function(
 
             if audio_stats:
                 stats["audio"] = audio_stats
+
+        # Add video statistics if we have avsync results
+        if len(avsync_results) > 0:
+            video_stats = video_stats_function(
+                avsync_results,
+                output_stats,
+                source_file,
+                ref_fps,
+            )
+
+            if video_stats:
+                stats["video"] = video_stats
 
         # Add source file as first entry if provided
         if source_file:
