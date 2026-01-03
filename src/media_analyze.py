@@ -387,11 +387,24 @@ def match_video_to_audio_timestamp(
     beep_period_frames,
     frame_time,
     previous_matches,
+    used_video_timestamps,
     closest=False,
     match_distance_frames=-1,
     debug=1,
 ):
     video_results = video_results.copy()
+
+    # Filter out already-used video timestamps to prevent reuse
+    video_results = video_results[
+        ~video_results["timestamp"].isin(used_video_timestamps)
+    ]
+
+    if len(video_results) == 0:
+        print(
+            f"Warning. No unused video frames available for audio timestamp {audio_timestamp}"
+        )
+        return None
+
     # The algorithm works as follows:
     # 1) find the frame in video that match the closest to audio_timestamp
     # 2) check the value parsed and compare to the expected beep frame time
@@ -611,6 +624,7 @@ def calculate_video_relation(
     frame_time = 1 / fps
 
     previous_matches = []
+    used_video_timestamps = set()  # Track used video timestamps to prevent reuse
     video_latency_results = pd.DataFrame(
         columns=[
             "frame_num",
@@ -634,12 +648,14 @@ def calculate_video_relation(
             beep_period_frames,
             frame_time,
             previous_matches,
+            used_video_timestamps,
             closest=closest_reference,
         )
 
         if vmatch is not None:
             video_latency_results.loc[len(video_latency_results.index)] = vmatch
             previous_matches.append(vmatch[4])  # Use smoothed value for tracking
+            used_video_timestamps.add(vmatch[1])  # Track video timestamp
         else:
             print(f"ERROR: no match found for video latency calculation")
 
