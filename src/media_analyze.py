@@ -1167,29 +1167,39 @@ def video_stats_function(
         timestamps = valid_frames["video_timestamp"].values
         inter_frame_times = np.diff(timestamps)
 
-        # Calculate jitter as stddev of inter-frame times
-        mean_inter_frame_sec = np.mean(inter_frame_times)
-        jitter_sec = np.std(inter_frame_times)
+        # Filter out large gaps caused by missing VFT reads (measurement errors)
+        # Use median as robust estimate of expected beep period
+        median_spacing = np.median(inter_frame_times)
+        # Keep only spacings within 1.5x the median (filter out gaps from missing reads)
+        valid_spacings = inter_frame_times[inter_frame_times < median_spacing * 1.5]
 
-        mean_inter_frame_ms = mean_inter_frame_sec * 1000
-        jitter_ms = jitter_sec * 1000
+        if len(valid_spacings) < 2:
+            # Not enough valid spacings to calculate jitter
+            pass
+        else:
+            # Calculate jitter as stddev of valid inter-frame times
+            mean_inter_frame_sec = np.mean(valid_spacings)
+            jitter_sec = np.std(valid_spacings)
 
-        # For avsync data, frames are sampled at beep intervals (~3000ms for 3sec spacing)
-        # not at frame rate intervals (~33ms). Use percentage of mean spacing as threshold.
-        jitter_threshold_percentage = THRESHOLDS["video"][
-            "timing_jitter_threshold_multiplier"
-        ]
-        jitter_threshold_ms = mean_inter_frame_ms * jitter_threshold_percentage
+            mean_inter_frame_ms = mean_inter_frame_sec * 1000
+            jitter_ms = jitter_sec * 1000
 
-        if jitter_ms > jitter_threshold_ms:
-            issues.append("timing_jitter")
-            issue_details["timing_jitter"] = {
-                "jitter_stddev_ms": float(jitter_ms),
-                "mean_inter_frame_ms": float(mean_inter_frame_ms),
-                "threshold_ms": float(jitter_threshold_ms),
-                "threshold_percentage": float(jitter_threshold_percentage * 100),
-                "description": "High variance in frame presentation timing indicating poor vsync or timing stability",
-            }
+            # For avsync data, frames are sampled at beep intervals (~3000ms for 3sec spacing)
+            # not at frame rate intervals (~33ms). Use percentage of mean spacing as threshold.
+            jitter_threshold_percentage = THRESHOLDS["video"][
+                "timing_jitter_threshold_multiplier"
+            ]
+            jitter_threshold_ms = mean_inter_frame_ms * jitter_threshold_percentage
+
+            if jitter_ms > jitter_threshold_ms:
+                issues.append("timing_jitter")
+                issue_details["timing_jitter"] = {
+                    "jitter_stddev_ms": float(jitter_ms),
+                    "mean_inter_frame_ms": float(mean_inter_frame_ms),
+                    "threshold_ms": float(jitter_threshold_ms),
+                    "threshold_percentage": float(jitter_threshold_percentage * 100),
+                    "description": "High variance in frame presentation timing indicating poor vsync or timing stability",
+                }
 
     # 4. Frame Rate Consistency (ERROR)
     if "video_timestamp" in valid_frames.columns and len(valid_frames) > ref_fps:
