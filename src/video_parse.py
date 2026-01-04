@@ -70,6 +70,7 @@ def image_parse(
     tag_center_locations,
     tag_expected_center_locations,
     debug,
+    frame_debug_mode="all",
 ):
     value_read, status = image_parse_raw(
         img,
@@ -79,6 +80,7 @@ def image_parse(
         tag_center_locations=tag_center_locations,
         tag_expected_center_locations=tag_expected_center_locations,
         debug=debug,
+        frame_debug_mode=frame_debug_mode,
     )
     return value_read, status
 
@@ -111,6 +113,7 @@ def video_parse(
     brightness=0,
     video_reader_class=None,
     frame_num_debug_output=-1,
+    frame_debug_mode="all",
     debug=0,
 ):
     # reset and latch onto a fresh layout config
@@ -227,7 +230,17 @@ def video_parse(
                     tag_center_locations,
                     tag_expected_center_locations,
                     debug_for_frame,
+                    frame_debug_mode=frame_debug_mode,
                 )
+
+                # Early exit after debug frame is written
+                if frame_num == frame_num_debug_output and frame_num_debug_output >= 0:
+                    print(
+                        f"Debug frame {frame_num} written. Exiting early as requested.",
+                        file=sys.stderr,
+                    )
+                    break
+
                 if not vft.VFTReading.readable(status):
                     threshold = threshold / 2
 
@@ -295,7 +308,16 @@ def video_parse(
                     tag_center_locations,
                     tag_expected_center_locations,
                     debug_for_frame,
+                    frame_debug_mode=frame_debug_mode,
                 )
+
+                # Early exit after debug frame is written
+                if frame_num == frame_num_debug_output and frame_num_debug_output >= 0:
+                    print(
+                        f"Debug frame {frame_num} written. Exiting early as requested.",
+                        file=sys.stderr,
+                    )
+                    break
 
         if not vft.VFTReading.readable(status):
             if debug > 0:
@@ -438,6 +460,7 @@ def image_parse_raw(
     tag_center_locations=None,
     tag_expected_center_locations=None,
     debug=0,
+    frame_debug_mode="all",
 ):
     num_read, status, vft_id = vft.graycode_parse(
         img,
@@ -447,6 +470,7 @@ def image_parse_raw(
         tag_center_locations=tag_center_locations,
         tag_expected_center_locations=tag_expected_center_locations,
         debug=debug,
+        frame_debug_mode=frame_debug_mode,
     )
     return num_read, status
 

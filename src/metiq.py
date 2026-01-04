@@ -179,6 +179,17 @@ input_args = {
             "default": -1,
         },
     },
+    "frame_debug_mode": {
+        "func": PARSE,
+        "short": "",
+        "long": "--frame-debug-mode",
+        "args": {
+            "type": str,
+            "choices": ["zoom", "original", "all"],
+            "help": "Debug visualization mode: 'zoom' for 5x scaled image, 'original' for original size with overlays, 'all' for both (default)",
+            "default": "all",
+        },
+    },
     "fps": {
         "func": GENERATE,
         "short": "",
@@ -752,6 +763,7 @@ def main(argv):
             video_reader_class=video_reader_class,
             audio_reader_class=audio_reader_class,
             frame_num_debug_output=options.frame_num_debug_output,
+            frame_debug_mode=options.frame_debug_mode,
             debug=options.debug,
         )
 

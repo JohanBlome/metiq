@@ -102,6 +102,7 @@ def media_parse_video(
     brightness = kwargs.get("brightness", 0)
     video_reader_class = kwargs.get("video_reader_class", None)
     frame_num_debug_output = kwargs.get("frame_num_debug_output", -1)
+    frame_debug_mode = kwargs.get("frame_debug_mode", "all")
 
     try:
         # recalculate the video results
@@ -120,6 +121,7 @@ def media_parse_video(
             brightness=brightness,
             video_reader_class=video_reader_class,
             frame_num_debug_output=frame_num_debug_output,
+            frame_debug_mode=frame_debug_mode,
             debug=debug,
         )
         if debug > 0:
@@ -150,25 +152,34 @@ def media_parse(
     debug,
     **kwargs,
 ):
-    # 1. parse the audio stream
-    if output_audio is None:
-        output_audio = infile + ".audio.csv"
-    audio_results = media_parse_audio(
-        pre_samples,
-        samplerate,
-        beep_freq,
-        beep_duration_samples,
-        beep_period_sec,
-        scale,
-        infile,
-        output_audio,
-        debug,
-        **kwargs,
-    )
+    # Check if we're only generating a debug frame (skip audio processing if so)
+    frame_num_debug_output = kwargs.get("frame_num_debug_output", -1)
 
-    if audio_results is None:
-        print("ERROR: audio parsing failed. Exiting.")
-        return None
+    # 1. parse the audio stream (skip if only generating debug frame)
+    if frame_num_debug_output >= 0:
+        import sys
+
+        print("Skipping audio processing for debug frame generation", file=sys.stderr)
+        audio_results = None
+    else:
+        if output_audio is None:
+            output_audio = infile + ".audio.csv"
+        audio_results = media_parse_audio(
+            pre_samples,
+            samplerate,
+            beep_freq,
+            beep_duration_samples,
+            beep_period_sec,
+            scale,
+            infile,
+            output_audio,
+            debug,
+            **kwargs,
+        )
+
+        if audio_results is None:
+            print("ERROR: audio parsing failed. Exiting.")
+            return None
 
     # 2. parse the video stream
     if output_video is None:

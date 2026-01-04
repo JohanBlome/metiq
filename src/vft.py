@@ -126,6 +126,7 @@ def graycode_parse(
     tag_center_locations=None,
     tag_expected_center_locations=None,
     debug=0,
+    frame_debug_mode="all",
 ):
     global vft_layout
     bit_stream = None
@@ -142,9 +143,16 @@ def graycode_parse(
             tag_center_locations,
             tag_expected_center_locations,
             debug,
+            frame_debug_mode=frame_debug_mode,
         )
     else:
-        bit_stream, vft_id = do_parse(img, frame_id, luma_threshold, debug=debug)
+        bit_stream, vft_id = do_parse(
+            img,
+            frame_id,
+            luma_threshold,
+            debug=debug,
+            frame_debug_mode=frame_debug_mode,
+        )
     # convert gray code in bit_stream to a number
     if bit_stream is not None:
         num_read, status = gray_bitstream_to_num(bit_stream)
@@ -230,6 +238,7 @@ def locked_parse(
     tag_center_locations=None,
     tag_expected_center_locations=None,
     debug=0,
+    frame_debug_mode="all",
 ):
     img_transformed = None
     if len(tag_center_locations) == 3:
@@ -250,12 +259,19 @@ def locked_parse(
         k = cv2.waitKey(-1)
 
     bit_stream = parse_read_bits(
-        img_transformed, frame_id, vft_layout, luma_threshold, debug=debug
+        img_transformed,
+        frame_id,
+        vft_layout,
+        luma_threshold,
+        debug=debug,
+        frame_debug_mode=frame_debug_mode,
+        tag_center_locations=tag_center_locations,
+        tag_expected_center_locations=tag_expected_center_locations,
     )
     return bit_stream, vft_id
 
 
-def do_parse(img, frame_id, luma_threshold, debug=0):
+def do_parse(img, frame_id, luma_threshold, debug=0, frame_debug_mode="all"):
     ids = None
     # 1. get VFT id and tag locations
     vft_id, tag_center_locations, borders, ids = detect_tags(img, debug=debug)
@@ -306,7 +322,12 @@ def do_parse(img, frame_id, luma_threshold, debug=0):
 
     # 4. read the bits
     bit_stream = parse_read_bits(
-        img_transformed, frame_id, vft_layout, luma_threshold, debug=debug
+        img_transformed,
+        frame_id,
+        vft_layout,
+        luma_threshold,
+        debug=debug,
+        frame_debug_mode=frame_debug_mode,
     )
     return bit_stream, vft_id
 
@@ -563,7 +584,16 @@ def affine_transformation(
 last_min_diff = -1
 
 
-def parse_read_bits(img, frame_id, vft_layout, luma_threshold, debug):
+def parse_read_bits(
+    img,
+    frame_id,
+    vft_layout,
+    luma_threshold,
+    debug,
+    frame_debug_mode="all",
+    tag_center_locations=None,
+    tag_expected_center_locations=None,
+):
     global last_min_diff
     # 1. extract the luma
     if len(img.shape) == 3:
@@ -612,38 +642,83 @@ def parse_read_bits(img, frame_id, vft_layout, luma_threshold, debug):
     bit_stream.reverse()
     if debug > 1:
         # 4. write annotated image to file
-        outfile = (
-            "/tmp/vft_debug."
-            + os.path.normpath(frame_id).split(os.sep)[-1]
-            + ".value_"
-            + "".join(str(bit) for bit in bit_stream)
-            + ".png"
-        )
+        # frame_id is in format: {infile}.frame_{frame_num}
+        # Extract the base file path and frame number
+        if ".frame_" in frame_id:
+            infile_base, frame_part = frame_id.rsplit(".frame_", 1)
+            frame_num = frame_part
+        else:
+            # Fallback if format doesn't match
+            infile_base = frame_id
+            frame_num = "0"
+
         if diff != last_min_diff:
             print(f"minimum diff was {diff}")
             last_min_diff = diff
-        write_annotated_tag(img, vft_layout, outfile)
+
+        if frame_debug_mode == "all":
+            # Write both zoom and original modes
+            outfile_zoom = f"{infile_base}.vft_debug.frame_{frame_num}.zoom.png"
+            outfile_original = f"{infile_base}.vft_debug.frame_{frame_num}.original.png"
+            write_annotated_tag(
+                img,
+                vft_layout,
+                outfile_zoom,
+                mode="zoom",
+                tag_center_locations=tag_center_locations,
+                tag_expected_center_locations=tag_expected_center_locations,
+            )
+            write_annotated_tag(
+                img,
+                vft_layout,
+                outfile_original,
+                mode="original",
+                tag_center_locations=tag_center_locations,
+                tag_expected_center_locations=tag_expected_center_locations,
+            )
+        else:
+            # Write single mode
+            outfile = (
+                f"{infile_base}.vft_debug.frame_{frame_num}.{frame_debug_mode}.png"
+            )
+            write_annotated_tag(
+                img,
+                vft_layout,
+                outfile,
+                mode=frame_debug_mode,
+                tag_center_locations=tag_center_locations,
+                tag_expected_center_locations=tag_expected_center_locations,
+            )
     return bit_stream
 
 
-def write_annotated_tag(img, vft_layout, outfile):
-    # Scale up the image for better visibility (5x zoom for more detail)
-    scale_factor = 5
-    height, width = img.shape[:2]
-    img_scaled = cv2.resize(
-        img,
-        (width * scale_factor, height * scale_factor),
-        interpolation=cv2.INTER_LINEAR,
-    )
+def write_annotated_tag(
+    img,
+    vft_layout,
+    outfile,
+    mode="zoom",
+    tag_center_locations=None,
+    tag_expected_center_locations=None,
+):
+    """Write annotated VFT tag image with fiducials and data blocks highlighted.
+
+    Args:
+        img: Input image (already transformed)
+        vft_layout: VFT layout object
+        outfile: Output filename
+        mode: "zoom" or "original" - controls annotation style
+        tag_center_locations: Actual detected fiducial positions
+        tag_expected_center_locations: Expected fiducial positions
+    """
+    # Work with a copy to avoid modifying input
+    img_output = img.copy()
 
     # Convert grayscale to BGR for color drawing
-    if len(img_scaled.shape) == 2:
-        img_scaled = cv2.cvtColor(img_scaled, cv2.COLOR_GRAY2BGR)
+    if len(img_output.shape) == 2:
+        img_output = cv2.cvtColor(img_output, cv2.COLOR_GRAY2BGR)
 
-    # Calculate circle radius based on block dimensions (25% of block size)
-    block_width_scaled = int(vft_layout.block_width * scale_factor)
-    block_height_scaled = int(vft_layout.block_height * scale_factor)
-    circle_radius = min(block_width_scaled, block_height_scaled) // 4
+    # Calculate circle radius based on block dimensions (33% of block size)
+    circle_radius = min(vft_layout.block_width, vft_layout.block_height) // 3
 
     for row, col in itertools.product(
         range(vft_layout.numrows), range(vft_layout.numcols)
@@ -651,41 +726,72 @@ def write_annotated_tag(img, vft_layout, outfile):
         block_id = (row * vft_layout.numcols) + col
         # get the coordinates
         col, row = vft_layout.get_colrow(block_id)
-        x0 = int(vft_layout.x[col] * scale_factor)
-        x1 = int((vft_layout.x[col] + vft_layout.block_width) * scale_factor)
-        y0 = int(vft_layout.y[row] * scale_factor)
-        y1 = int((vft_layout.y[row] + vft_layout.block_height) * scale_factor)
+        x0 = int(vft_layout.x[col])
+        x1 = int(vft_layout.x[col] + vft_layout.block_width)
+        y0 = int(vft_layout.y[row])
+        y1 = int(vft_layout.y[row] + vft_layout.block_height)
 
         if block_id in vft_layout.tag_block_ids:
-            # This is a fiducial (ArUco marker): draw red circle with X at center
-            center_x = (x0 + x1) // 2
-            center_y = (y0 + y1) // 2
+            # Only draw fiducials that were actually detected
+            if tag_center_locations is not None:
+                # Find which fiducial this is (0, 1, 2, or 3)
+                fiducial_index = vft_layout.tag_block_ids.index(block_id)
+                if fiducial_index < len(tag_center_locations):
+                    # This fiducial was detected - draw red circle with X
+                    center_x = (x0 + x1) // 2
+                    center_y = (y0 + y1) // 2
 
-            # Draw red filled circle
-            cv2.circle(img_scaled, (center_x, center_y), circle_radius, (0, 0, 255), -1)
+                    # Draw red filled circle
+                    cv2.circle(
+                        img_output, (center_x, center_y), circle_radius, (0, 0, 255), -1
+                    )
 
-            # Draw X through the circle (two diagonal lines)
-            line_len = int(circle_radius * 1.5)
-            line_thickness = max(3, circle_radius // 10)
-            cv2.line(
-                img_scaled,
-                (center_x - line_len, center_y - line_len),
-                (center_x + line_len, center_y + line_len),
-                (255, 255, 255),
-                line_thickness,
-            )  # White X
-            cv2.line(
-                img_scaled,
-                (center_x - line_len, center_y + line_len),
-                (center_x + line_len, center_y - line_len),
-                (255, 255, 255),
-                line_thickness,
-            )  # White X
+                    # Draw X through the circle (two diagonal lines)
+                    line_len = int(circle_radius * 1.5)
+                    line_thickness = max(3, circle_radius // 10)
+                    cv2.line(
+                        img_output,
+                        (center_x - line_len, center_y - line_len),
+                        (center_x + line_len, center_y + line_len),
+                        (255, 255, 255),
+                        line_thickness,
+                    )  # White X
+                    cv2.line(
+                        img_output,
+                        (center_x - line_len, center_y + line_len),
+                        (center_x + line_len, center_y - line_len),
+                        (255, 255, 255),
+                        line_thickness,
+                    )  # White X
+            else:
+                # No tag_center_locations provided - draw all fiducials
+                center_x = (x0 + x1) // 2
+                center_y = (y0 + y1) // 2
+                cv2.circle(
+                    img_output, (center_x, center_y), circle_radius, (0, 0, 255), -1
+                )
+                line_len = int(circle_radius * 1.5)
+                line_thickness = max(3, circle_radius // 10)
+                cv2.line(
+                    img_output,
+                    (center_x - line_len, center_y - line_len),
+                    (center_x + line_len, center_y + line_len),
+                    (255, 255, 255),
+                    line_thickness,
+                )
+                cv2.line(
+                    img_output,
+                    (center_x - line_len, center_y + line_len),
+                    (center_x + line_len, center_y - line_len),
+                    (255, 255, 255),
+                    line_thickness,
+                )
         else:
             # This is a data block: draw green rectangle
-            cv2.rectangle(img_scaled, (x0, y0), (x1, y1), (0, 255, 0), 10)
+            rect_thickness = max(2, 10 // 5)
+            cv2.rectangle(img_output, (x0, y0), (x1, y1), (0, 255, 0), rect_thickness)
 
-    cv2.imwrite(outfile, img_scaled)
+    cv2.imwrite(outfile, img_output)
 
 
 def bit_stream_to_number(bit_stream):
