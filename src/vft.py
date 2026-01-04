@@ -627,28 +627,65 @@ def parse_read_bits(img, frame_id, vft_layout, luma_threshold, debug):
 
 
 def write_annotated_tag(img, vft_layout, outfile):
+    # Scale up the image for better visibility (5x zoom for more detail)
+    scale_factor = 5
+    height, width = img.shape[:2]
+    img_scaled = cv2.resize(
+        img,
+        (width * scale_factor, height * scale_factor),
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+    # Convert grayscale to BGR for color drawing
+    if len(img_scaled.shape) == 2:
+        img_scaled = cv2.cvtColor(img_scaled, cv2.COLOR_GRAY2BGR)
+
+    # Calculate circle radius based on block dimensions (25% of block size)
+    block_width_scaled = int(vft_layout.block_width * scale_factor)
+    block_height_scaled = int(vft_layout.block_height * scale_factor)
+    circle_radius = min(block_width_scaled, block_height_scaled) // 4
+
     for row, col in itertools.product(
         range(vft_layout.numrows), range(vft_layout.numcols)
     ):
         block_id = (row * vft_layout.numcols) + col
-        if block_id in vft_layout.tag_block_ids:
-            # this is a tag: skip it
-            continue
         # get the coordinates
         col, row = vft_layout.get_colrow(block_id)
-        x0 = vft_layout.x[col]
-        x1 = x0 + vft_layout.block_width
-        y0 = vft_layout.y[row]
-        y1 = y0 + vft_layout.block_height
-        color = (
-            random.randrange(256),
-            random.randrange(256),
-            random.randrange(256),
-        )
-        # pts = np.array([[x0, y0], [x0, y1 - 1], [x1 - 1, y1 - 1], [x1 - 1, y0]])
-        # cv2.fillPoly(img, pts=[pts], color=color)
-        cv2.rectangle(img, (x0, y0), (x1, y1), color, 10)
-    cv2.imwrite(outfile, img)
+        x0 = int(vft_layout.x[col] * scale_factor)
+        x1 = int((vft_layout.x[col] + vft_layout.block_width) * scale_factor)
+        y0 = int(vft_layout.y[row] * scale_factor)
+        y1 = int((vft_layout.y[row] + vft_layout.block_height) * scale_factor)
+
+        if block_id in vft_layout.tag_block_ids:
+            # This is a fiducial (ArUco marker): draw red circle with X at center
+            center_x = (x0 + x1) // 2
+            center_y = (y0 + y1) // 2
+
+            # Draw red filled circle
+            cv2.circle(img_scaled, (center_x, center_y), circle_radius, (0, 0, 255), -1)
+
+            # Draw X through the circle (two diagonal lines)
+            line_len = int(circle_radius * 1.5)
+            line_thickness = max(3, circle_radius // 10)
+            cv2.line(
+                img_scaled,
+                (center_x - line_len, center_y - line_len),
+                (center_x + line_len, center_y + line_len),
+                (255, 255, 255),
+                line_thickness,
+            )  # White X
+            cv2.line(
+                img_scaled,
+                (center_x - line_len, center_y + line_len),
+                (center_x + line_len, center_y - line_len),
+                (255, 255, 255),
+                line_thickness,
+            )  # White X
+        else:
+            # This is a data block: draw green rectangle
+            cv2.rectangle(img_scaled, (x0, y0), (x1, y1), (0, 255, 0), 10)
+
+    cv2.imwrite(outfile, img_scaled)
 
 
 def bit_stream_to_number(bit_stream):

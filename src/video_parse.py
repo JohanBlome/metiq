@@ -110,6 +110,7 @@ def video_parse(
     contrast=1,
     brightness=0,
     video_reader_class=None,
+    frame_num_debug_output=-1,
     debug=0,
 ):
     # reset and latch onto a fresh layout config
@@ -216,6 +217,8 @@ def video_parse(
                 # errors (small errors are unlikely - large ones very likely).
 
                 frame_id = f"{infile}.frame_{frame_num}"
+                # Set debug=2 for the target frame to trigger VFT annotation in parse_read_bits()
+                debug_for_frame = 2 if frame_num == frame_num_debug_output else debug
                 value_read, status = image_parse(
                     img,
                     frame_id,
@@ -223,7 +226,7 @@ def video_parse(
                     vft_id,
                     tag_center_locations,
                     tag_expected_center_locations,
-                    debug,
+                    debug_for_frame,
                 )
                 if not vft.VFTReading.readable(status):
                     threshold = threshold / 2
@@ -282,6 +285,8 @@ def video_parse(
                         tag_expected_center_locations, vft_layout, _ids
                     )
                 frame_id = f"{infile}.frame_{frame_num}"
+                # Set debug=2 for the target frame to trigger VFT annotation in parse_read_bits()
+                debug_for_frame = 2 if frame_num == frame_num_debug_output else debug
                 value_read, status = image_parse(
                     img,
                     frame_id,
@@ -289,7 +294,7 @@ def video_parse(
                     vft_id,
                     tag_center_locations,
                     tag_expected_center_locations,
-                    debug,
+                    debug_for_frame,
                 )
 
         if not vft.VFTReading.readable(status):
@@ -323,6 +328,7 @@ def video_parse(
             print(f"video_parse: read image value: {value_read}")
             if not isinstance(value_read, int):
                 cv2.imwrite(f"debug/{infile}_{frame_num}.png", img)
+
         video_results.loc[len(video_results.index)] = (
             frame_num,
             video_frame.pts_time,

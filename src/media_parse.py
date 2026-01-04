@@ -101,6 +101,7 @@ def media_parse_video(
     contrast = kwargs.get("contrast", 1)
     brightness = kwargs.get("brightness", 0)
     video_reader_class = kwargs.get("video_reader_class", None)
+    frame_num_debug_output = kwargs.get("frame_num_debug_output", -1)
 
     try:
         # recalculate the video results
@@ -118,6 +119,7 @@ def media_parse_video(
             contrast=contrast,
             brightness=brightness,
             video_reader_class=video_reader_class,
+            frame_num_debug_output=frame_num_debug_output,
             debug=debug,
         )
         if debug > 0:

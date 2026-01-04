@@ -169,6 +169,16 @@ input_args = {
             "default": default_values["luma_threshold"],
         },
     },
+    "frame_num_debug_output": {
+        "func": PARSE,
+        "short": "",
+        "long": "--frame-num-debug-output",
+        "args": {
+            "type": int,
+            "help": "Frame number to output debug visualization (-1 = disabled)",
+            "default": -1,
+        },
+    },
     "fps": {
         "func": GENERATE,
         "short": "",
@@ -741,6 +751,7 @@ def main(argv):
             brightness=options.brightness,
             video_reader_class=video_reader_class,
             audio_reader_class=audio_reader_class,
+            frame_num_debug_output=options.frame_num_debug_output,
             debug=options.debug,
         )
 
