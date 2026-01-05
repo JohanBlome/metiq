@@ -43,3 +43,7 @@ def run(command, **kwargs):
     del p
     # return results
     return returncode, out, err
+
+
+def get_frame_id(infile, frame_num):
+    return f"{infile}.frame_{frame_num}"

@@ -64,29 +64,33 @@ def estimate_video_smoothness(video_results, fps):
 
 def image_parse(
     img,
-    frame_id,
+    infile,
+    frame_num,
     luma_threshold,
     vft_id,
     tag_center_locations,
     tag_expected_center_locations,
-    debug,
+    frame_num_debug_output=-1,
     frame_debug_mode="all",
+    debug=0,
 ):
     value_read, status = image_parse_raw(
         img,
-        frame_id,
+        infile,
+        frame_num,
         luma_threshold,
         vft_id=vft_id,
         tag_center_locations=tag_center_locations,
         tag_expected_center_locations=tag_expected_center_locations,
-        debug=debug,
+        frame_num_debug_output=frame_num_debug_output,
         frame_debug_mode=frame_debug_mode,
+        debug=debug,
     )
     return value_read, status
 
 
-# Returns a list with one tuple per frame in the distorted video
-# stream. Each tuple consists of the following elements:
+# Returns a dataframe with one row per frame in the distorted video
+# stream. Each row consists of the following elements:
 # * (a) `frame_num`: the frame number (correlative values) in
 #   the distorted file,
 # * (b) `timestamp`: the timestamp, calculated from `frame_num`
@@ -116,20 +120,24 @@ def video_parse(
     frame_debug_mode="all",
     debug=0,
 ):
+    columns = ("frame_num", "timestamp", "frame_num_expected", "status", "value_read")
+
     # reset and latch onto a fresh layout config
     vft_id = None
     tag_center_locations = None
     tag_expected_center_locations = None
 
-    # Open a window and mouse click coordinates?
     if tag_manual:
+        # open a window and use mouse click to get coordinates
         vft_id = vft.DEFAULT_VFT_ID
         tag_center_locations = vtc.tag_video(infile, width, height)
         vft_layout = vft.VFTLayout(width, height, vft_id)
         tag_expected_center_locations = vft_layout.get_tag_expected_center_locations()
         lock_layout = True
-    # With lock_layout go through the file until valid tags has been identified.
-    # Save settings and use those for tranformation and gray code parsing.
+
+    # lock_layout mode: go through the file until valid tags has been
+    # identified. Save settings and use those for tranformation and
+    # gray code parsing.
     if lock_layout and vft_id is None:
         (
             vft_id,
@@ -146,6 +154,8 @@ def video_parse(
             video_reader_class,
             debug,
         )
+
+    # create a video reader
     video_reader = metiq_reader.create_video_reader(
         infile,
         reader_class=video_reader_class,
@@ -160,37 +170,36 @@ def video_parse(
     if metadata is None:
         print(f"error: {infile = } is not open")
         sys.exit(-1)
-    # 1. parse the video image-by-image
+
+    # initial information
     if metadata.width < width:
         width = 0
     if metadata.height < height:
         height = 0
-
     frame_num = -1
-    columns = ("frame_num", "timestamp", "frame_num_expected", "status", "value_read")
     video_results = pd.DataFrame(columns=columns)
     previous_value = -1
-
     start = time.monotonic_ns()
     accumulated_decode_time = 0
     failed_parses = 0
     vft_layout = None
 
+    # parse the video image-by-image
     while True:
-        # get image
+        # read image
         decstart = time.monotonic_ns()
         success, video_frame = video_reader.read()
         ids = None
         if not success:
             break
-
         img = video_frame.data
 
+        # adjust image (contrast, brightness, sharpening)
         if contrast != 1 or brightness != 0:
             img = adjust_image(img, 1.3, -10)
-        # sharpen image
         if sharpen:
             imn = sharpen_multi(img, "sharpen")
+
         frame_num += 1
         accumulated_decode_time += time.monotonic_ns() - decstart
         # this (wrongly) assumes frames are perfectly separated
@@ -202,6 +211,7 @@ def video_parse(
             print(
                 f"video_parse: parsing {frame_num = } timestamp = {video_frame.pts_time} {ref_fps = } fps = {metadata.fps}"
             )
+
         # parse image
         value_read = None
         if width > 0 and height > 0:
@@ -218,19 +228,17 @@ def video_parse(
                 # To prevent the `first value from being garbage wait until there is something stable.
                 # We can accept some instability later on since the check on large jumps will prevent
                 # errors (small errors are unlikely - large ones very likely).
-
-                frame_id = f"{infile}.frame_{frame_num}"
-                # Set debug=2 for the target frame to trigger VFT annotation in parse_read_bits()
-                debug_for_frame = 2 if frame_num == frame_num_debug_output else debug
                 value_read, status = image_parse(
                     img,
-                    frame_id,
+                    infile,
+                    frame_num,
                     threshold,
                     vft_id,
                     tag_center_locations,
                     tag_expected_center_locations,
-                    debug_for_frame,
+                    frame_num_debug_output=frame_num_debug_output,
                     frame_debug_mode=frame_debug_mode,
+                    debug=debug,
                 )
 
                 # Early exit after debug frame is written
@@ -297,18 +305,17 @@ def video_parse(
                     tag_expected_center_locations = sort_tag_expected_center_locations(
                         tag_expected_center_locations, vft_layout, _ids
                     )
-                frame_id = f"{infile}.frame_{frame_num}"
-                # Set debug=2 for the target frame to trigger VFT annotation in parse_read_bits()
-                debug_for_frame = 2 if frame_num == frame_num_debug_output else debug
                 value_read, status = image_parse(
                     img,
-                    frame_id,
+                    infile,
+                    frame_num,
                     luma_threshold,
                     vft_id,
                     tag_center_locations,
                     tag_expected_center_locations,
-                    debug_for_frame,
+                    frame_num_debug_output=frame_num_debug_output,
                     frame_debug_mode=frame_debug_mode,
+                    debug=debug,
                 )
 
                 # Early exit after debug frame is written
@@ -359,13 +366,19 @@ def video_parse(
             value_read,
         )
 
-    # 2. clean up
+    # clean up
     try:
         video_reader.release()
     except Exception as exc:
         print(f"error: {exc = }")
         pass
-    # 3. calculate the delta mode
+
+    # If we exited early for debug frame output, return empty DataFrame
+    # to avoid processing incomplete data
+    if frame_num_debug_output >= 0 and len(video_results) <= frame_num_debug_output + 1:
+        return pd.DataFrame(columns=columns)
+
+    # calculate the delta mode
     # note that <timestamps> = k * <frame_num>
     num_frames = len(video_results)
     # remove the None values in order to calculate the delta between frames
@@ -376,7 +389,8 @@ def video_parse(
     delta_mode = []
     if delta_mode and delta_mode.any():
         delta_mode = scipy.stats.mode(delta_list, keepdims=True).mode[0]
-    # 4. calculate the delta column
+
+    # calculate the delta column
     # simplify the results: substract the mode, and keep the None
     # * value_read - (frame_num_expected + delta_mode)  # if value_read is not None
     # * None  # otherwise
@@ -454,23 +468,27 @@ def video_parse_delta_info(video_results):
 
 def image_parse_raw(
     img,
-    frame_id,
+    infile,
+    frame_num,
     luma_threshold,
     vft_id=None,
     tag_center_locations=None,
     tag_expected_center_locations=None,
-    debug=0,
+    frame_num_debug_output=-1,
     frame_debug_mode="all",
+    debug=0,
 ):
     num_read, status, vft_id = vft.graycode_parse(
         img,
-        frame_id,
+        infile,
+        frame_num,
         luma_threshold,
         vft_id=vft_id,
         tag_center_locations=tag_center_locations,
         tag_expected_center_locations=tag_expected_center_locations,
-        debug=debug,
+        frame_num_debug_output=frame_num_debug_output,
         frame_debug_mode=frame_debug_mode,
+        debug=debug,
     )
     return num_read, status
 
@@ -651,7 +669,7 @@ def find_first_valid_tag(
             img, cached_ids, cached_corners, debug
         )
 
-        # bail if we are reading to far ahead (three times the beep?)
+        # bail if we are reading too far ahead (three times the beep?)
         # compare with beep time (pts_time is in seconds, compare with ms)
         if video_frame.pts_time * 1000.0 > audio_common.DEFAULT_BEEP_PERIOD_SEC * 3000:
             print(

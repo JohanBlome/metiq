@@ -28,6 +28,7 @@ Example edts with 2112-sample skip:
 """
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
@@ -264,8 +265,6 @@ class MP4ContainerAnalyzer:
 
         finally:
             # Clean up temporary file
-            import os
-
             try:
                 os.unlink(xml_file)
             except Exception:

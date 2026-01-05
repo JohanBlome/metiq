@@ -3,6 +3,8 @@
 """media_parse.py module description."""
 
 
+import sys
+
 import audio_parse
 import video_parse
 
@@ -157,8 +159,6 @@ def media_parse(
 
     # 1. parse the audio stream (skip if only generating debug frame)
     if frame_num_debug_output >= 0:
-        import sys
-
         print("Skipping audio processing for debug frame generation", file=sys.stderr)
         audio_results = None
     else:

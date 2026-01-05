@@ -7,21 +7,23 @@ A VFT (Video Fine-Grained Timing) 2D Barcode Library.
 
 
 import argparse
+import copy
 import cv2
 import dataclasses
 import enum
 import graycode
 import itertools
+import json
+import numpy as np
 import operator
 import os
 import random
+import subprocess
 import sys
+import time
 import typing
-import numpy as np
 
 import aruco_common
-import time
-import copy
 
 __version__ = "0.1"
 
@@ -70,6 +72,12 @@ ARUCO_DICT_ID = cv2.aruco.DICT_4X4_50
 COLOR_BLACK = (0, 0, 0)
 COLOR_BACKGROUND = (128, 128, 128)
 COLOR_WHITE = (255, 255, 255)
+
+# Debug visualization colors
+COLOR_FIDUCIAL_CIRCLE = (0, 0, 255)  # red
+COLOR_FIDUCIAL_ARROW = (255, 255, 255)  # white
+COLOR_FIDUCIAL_TEXT = (255, 0, 0)  # blue
+COLOR_BLOCK_BORDER = (0, 255, 0)  # green
 
 MIN_TAG_BORDER_SIZE = 2
 MIN_SIZE = 64
@@ -120,13 +128,15 @@ vft_layout = None
 
 def graycode_parse(
     img,
-    frame_id,
+    infile,
+    frame_num,
     luma_threshold,
     vft_id=None,
     tag_center_locations=None,
     tag_expected_center_locations=None,
-    debug=0,
+    frame_num_debug_output=-1,
     frame_debug_mode="all",
+    debug=0,
 ):
     global vft_layout
     bit_stream = None
@@ -136,7 +146,8 @@ def graycode_parse(
 
         bit_stream, vft_id = locked_parse(
             img,
-            frame_id,
+            infile,
+            frame_num,
             luma_threshold,
             vft_id,
             vft_layout,
@@ -148,10 +159,12 @@ def graycode_parse(
     else:
         bit_stream, vft_id = do_parse(
             img,
-            frame_id,
+            infile,
+            frame_num,
             luma_threshold,
-            debug=debug,
+            frame_num_debug_output=frame_num_debug_output,
             frame_debug_mode=frame_debug_mode,
+            debug=debug,
         )
     # convert gray code in bit_stream to a number
     if bit_stream is not None:
@@ -173,7 +186,7 @@ def generate_file(width, height, vft_id, tag_border_size, value, outfile, debug)
     cv2.imwrite(outfile, img)
 
 
-def parse_file(infile, luma_threshold, width=0, height=0, debug=0):
+def parse_file(infile, frame_num, luma_threshold, width=0, height=0, debug=0):
     img = cv2.imread(cv2.samples.findFile(infile))
     if width > 0 and height > 0:
         dim = (width, height)
@@ -186,8 +199,7 @@ def parse_file(infile, luma_threshold, width=0, height=0, debug=0):
         gmean = int(np.mean(gray))
         gstd = int(np.std(gray))
         print(f"min/max luminance: {gmin}/{gmax}, mean: {gmean} +/- {gstd}")
-    frame_id = infile
-    return graycode_parse(img, frame_id, luma_threshold, debug=debug)
+    return graycode_parse(img, infile, frame_num, luma_threshold, debug=debug)
 
 
 # Generic Number-based API
@@ -231,24 +243,36 @@ def generate(width, height, vft_id, tag_border_size, value, debug):
 
 def locked_parse(
     img,
-    frame_id,
+    infile,
+    frame_num,
     luma_threshold,
     vft_id=None,
     vft_layout=None,
     tag_center_locations=None,
     tag_expected_center_locations=None,
-    debug=0,
+    frame_num_debug_output=-1,
     frame_debug_mode="all",
+    debug=0,
 ):
     img_transformed = None
-    if len(tag_center_locations) == 3:
+
+    # Convert dictionary to list of values in sorted key order
+    # (tag_center_locations is now a dict mapping tag_id -> (x, y))
+    if isinstance(tag_center_locations, dict):
+        tag_center_list = [
+            tag_center_locations[k] for k in sorted(tag_center_locations.keys())
+        ]
+    else:
+        tag_center_list = tag_center_locations
+
+    if len(tag_center_list) == 3:
         img_transformed = affine_transformation(
-            img, tag_center_locations, tag_expected_center_locations, debug=debug
+            img, tag_center_list, tag_expected_center_locations, debug=debug
         )
 
-    elif len(tag_center_locations) == 4:
+    elif len(tag_center_list) == 4:
         img_transformed = perspective_transformation(
-            img, tag_center_locations, tag_expected_center_locations, debug=debug
+            img, tag_center_list, tag_expected_center_locations, debug=debug
         )
     else:
         return None, vft_id
@@ -259,19 +283,30 @@ def locked_parse(
         k = cv2.waitKey(-1)
 
     bit_stream = parse_read_bits(
+        img,
         img_transformed,
-        frame_id,
+        infile,
+        frame_num,
         vft_layout,
         luma_threshold,
-        debug=debug,
+        frame_num_debug_output=frame_num_debug_output,
         frame_debug_mode=frame_debug_mode,
         tag_center_locations=tag_center_locations,
         tag_expected_center_locations=tag_expected_center_locations,
+        debug=debug,
     )
     return bit_stream, vft_id
 
 
-def do_parse(img, frame_id, luma_threshold, debug=0, frame_debug_mode="all"):
+def do_parse(
+    img,
+    infile,
+    frame_num,
+    luma_threshold,
+    frame_num_debug_output=-1,
+    frame_debug_mode="all",
+    debug=0,
+):
     ids = None
     # 1. get VFT id and tag locations
     vft_id, tag_center_locations, borders, ids = detect_tags(img, debug=debug)
@@ -286,14 +321,28 @@ def do_parse(img, frame_id, luma_threshold, debug=0, frame_debug_mode="all"):
     height, width, _ = img.shape
     vft_layout = VFTLayout(width, height, vft_id)
     if debug > 2:
-        for tag in tag_center_locations:
+        # Convert dictionary to list for iteration
+        tag_locs = (
+            [tag_center_locations[k] for k in sorted(tag_center_locations.keys())]
+            if isinstance(tag_center_locations, dict)
+            else tag_center_locations
+        )
+        for tag in tag_locs:
             cv2.circle(img, (int(tag[0]), int(tag[1])), 5, (0, 255, 0), 2)
         cv2.imshow("Source", img)
         k = cv2.waitKey(-1)
 
     # 3. apply affine transformation to source image
+    # Convert dictionary to list of values in sorted key order
+    if isinstance(tag_center_locations, dict):
+        tag_center_list = [
+            tag_center_locations[k] for k in sorted(tag_center_locations.keys())
+        ]
+    else:
+        tag_center_list = tag_center_locations
+
     tag_expected_center_locations = vft_layout.get_tag_expected_center_locations()
-    if len(tag_center_locations) == 3:
+    if len(tag_center_list) == 3:
         # if we do not have ids tags at this point but we have had them earlier
         # let us just assume all is well.
         # If we have ids points by all means sort them...
@@ -306,12 +355,12 @@ def do_parse(img, frame_id, luma_threshold, debug=0, frame_debug_mode="all"):
             ]
 
         img_transformed = affine_transformation(
-            img, tag_center_locations, tag_expected_center_locations, debug=debug
+            img, tag_center_list, tag_expected_center_locations, debug=debug
         )
 
-    elif len(tag_center_locations) == 4:
+    elif len(tag_center_list) == 4:
         img_transformed = perspective_transformation(
-            img, tag_center_locations, tag_expected_center_locations, debug=debug
+            img, tag_center_list, tag_expected_center_locations, debug=debug
         )
     else:
         return None, None
@@ -322,12 +371,15 @@ def do_parse(img, frame_id, luma_threshold, debug=0, frame_debug_mode="all"):
 
     # 4. read the bits
     bit_stream = parse_read_bits(
+        img,
         img_transformed,
-        frame_id,
+        infile,
+        frame_num,
         vft_layout,
         luma_threshold,
-        debug=debug,
+        frame_num_debug_output=frame_num_debug_output,
         frame_debug_mode=frame_debug_mode,
+        debug=debug,
     )
     return bit_stream, vft_id
 
@@ -456,8 +508,13 @@ def get_vft_id(ids):
 
 
 def get_tag_center_locations(ids, corners, debug=0):
-    tag_center_locations = []
+    tag_center_locations = {}
     expected_corner_shape = (1, 4, 2)
+
+    # Debug: print detected IDs
+    if debug > 0:
+        print(f"DEBUG get_tag_center_locations: detected IDs = {sorted(ids)}")
+
     for tag_id in sorted(ids):
         i = list(ids).index(tag_id)
         assert (
@@ -472,7 +529,11 @@ def get_tag_center_locations(ids, corners, debug=0):
             yt += y
         xt /= 4
         yt /= 4
-        tag_center_locations.append((xt, yt))
+        tag_center_locations[tag_id] = (xt, yt)
+
+        if debug > 0:
+            print(f"  ID {tag_id} -> center location ({xt:.1f}, {yt:.1f})")
+
     return tag_center_locations
 
 
@@ -585,21 +646,30 @@ last_min_diff = -1
 
 
 def parse_read_bits(
-    img,
-    frame_id,
+    img_original,
+    img_transformed,
+    infile,
+    frame_num,
     vft_layout,
     luma_threshold,
-    debug,
+    frame_num_debug_output=-1,
     frame_debug_mode="all",
     tag_center_locations=None,
     tag_expected_center_locations=None,
+    debug=0,
 ):
     global last_min_diff
+
+    # Check if this frame should generate debug output
+    if frame_num == frame_num_debug_output and frame_num_debug_output >= 0:
+        debug = 2
+
     # 1. extract the luma
-    if len(img.shape) == 3:
-        img_luma = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if len(img_transformed.shape) == 3:
+        img_luma = cv2.cvtColor(img_transformed, cv2.COLOR_BGR2GRAY)
     else:
-        img_luma = img
+        img_luma = img_transformed
+
     # 2. read the per-block luma average value
     block_luma_avgs = []
     pixels_per_block = vft_layout.block_width * vft_layout.block_height
@@ -620,6 +690,7 @@ def parse_read_bits(
         # calling np.mean is slower
         block_luma_avg = np.sum(img_luma_block) / pixels_per_block
         block_luma_avgs.append(block_luma_avg)
+
     # 3. convert per-block luma averages to bits
     # TODO(chema): what we really want here is an adaptive luma
     # threshold system: If we are getting luma avg values close
@@ -640,60 +711,341 @@ def parse_read_bits(
             bit = 0
         bit_stream.append(bit)
     bit_stream.reverse()
-    if debug > 1:
-        # 4. write annotated image to file
-        # frame_id is in format: {infile}.frame_{frame_num}
-        # Extract the base file path and frame number
-        if ".frame_" in frame_id:
-            infile_base, frame_part = frame_id.rsplit(".frame_", 1)
-            frame_num = frame_part
-        else:
-            # Fallback if format doesn't match
-            infile_base = frame_id
-            frame_num = "0"
 
+    if debug > 1:
         if diff != last_min_diff:
             print(f"minimum diff was {diff}")
             last_min_diff = diff
-
-        if frame_debug_mode == "all":
-            # Write both zoom and original modes
-            outfile_zoom = f"{infile_base}.vft_debug.frame_{frame_num}.zoom.png"
-            outfile_original = f"{infile_base}.vft_debug.frame_{frame_num}.original.png"
-            write_annotated_tag(
-                img,
-                vft_layout,
-                outfile_zoom,
-                mode="zoom",
-                tag_center_locations=tag_center_locations,
-                tag_expected_center_locations=tag_expected_center_locations,
-            )
-            write_annotated_tag(
-                img,
-                vft_layout,
-                outfile_original,
-                mode="original",
-                tag_center_locations=tag_center_locations,
-                tag_expected_center_locations=tag_expected_center_locations,
-            )
-        else:
-            # Write single mode
-            outfile = (
-                f"{infile_base}.vft_debug.frame_{frame_num}.{frame_debug_mode}.png"
-            )
-            write_annotated_tag(
-                img,
-                vft_layout,
-                outfile,
-                mode=frame_debug_mode,
-                tag_center_locations=tag_center_locations,
-                tag_expected_center_locations=tag_expected_center_locations,
-            )
+        write_annotated_image(
+            img_transformed,
+            img_original,
+            infile,
+            frame_num,
+            vft_layout,
+            frame_debug_mode,
+            tag_center_locations,
+            tag_expected_center_locations,
+        )
     return bit_stream
 
 
+def write_annotated_image_zoom(
+    img_transformed,
+    infile,
+    frame_num,
+    vft_layout,
+    tag_center_locations,
+    tag_expected_center_locations,
+):
+    """Write annotated VFT image in zoom mode."""
+    outfile_zoom = f"{infile}.vft_debug.frame_{frame_num}.zoom.png"
+    write_annotated_tag(
+        img_transformed,
+        vft_layout,
+        outfile_zoom,
+        mode="zoom",
+        tag_center_locations=tag_center_locations,
+        tag_expected_center_locations=tag_expected_center_locations,
+    )
+
+
+def write_annotated_image_original(
+    img_original,
+    infile,
+    frame_num,
+    vft_layout,
+    tag_center_locations,
+    tag_expected_center_locations,
+):
+    """Write annotated VFT image in original mode - shows detected fiducials at full video resolution."""
+    outfile_original = f"{infile}.vft_debug.frame_{frame_num}.original.png"
+
+    # Get the original video resolution using ffprobe
+    try:
+        ffprobe_cmd = [
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-select_streams",
+            "v:0",
+            infile,
+        ]
+        result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, check=True)
+        video_info = json.loads(result.stdout)
+        orig_width = video_info["streams"][0]["width"]
+        orig_height = video_info["streams"][0]["height"]
+    except Exception as e:
+        print(f"Warning: Could not get original video resolution: {e}")
+        print(f"  Falling back to img_original dimensions")
+        orig_height, orig_width = img_original.shape[:2]
+
+    # Extract the specific frame at full resolution using ffmpeg
+    try:
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-i",
+            infile,
+            "-vf",
+            f"select=eq(n\\,{frame_num}),scale={orig_width}:{orig_height}",
+            "-vframes",
+            "1",
+            "-f",
+            "image2pipe",
+            "-pix_fmt",
+            "gray",
+            "-vcodec",
+            "rawvideo",
+            "-",
+        ]
+        result = subprocess.run(ffmpeg_cmd, capture_output=True, check=True)
+        # Read the raw grayscale frame
+        img_fullres = np.frombuffer(result.stdout, dtype=np.uint8).reshape(
+            (orig_height, orig_width)
+        )
+    except Exception as e:
+        print(f"Warning: Could not extract full-resolution frame: {e}")
+        print(f"  Falling back to img_original")
+        img_fullres = img_original.copy()
+        orig_height, orig_width = img_fullres.shape[:2]
+
+    # Convert grayscale to BGR for color drawing
+    if len(img_fullres.shape) == 2:
+        img_output = cv2.cvtColor(img_fullres, cv2.COLOR_GRAY2BGR)
+    else:
+        img_output = img_fullres.copy()
+
+    # Calculate scaling factors from processing resolution to original resolution
+    scale_x = orig_width / vft_layout.width
+    scale_y = orig_height / vft_layout.height
+
+    # Calculate transformation matrix from detected fiducials if available
+    transform_matrix = None
+    if tag_center_locations is not None and tag_expected_center_locations is not None:
+        # Prepare detected and expected points
+        detected_points = []
+        expected_points = []
+
+        # Get the full unfiltered expected locations for proper indexing by tag_id
+        full_expected_locations = vft_layout.get_tag_expected_center_locations()
+        tag_ids = vft_layout.tag_ids
+
+        for tag_id in sorted(tag_center_locations.keys()):
+            if tag_id in tag_ids:
+                # Map tag_id to its index in the tag_ids list
+                idx = tag_ids.index(tag_id)
+                detected_points.append(tag_center_locations[tag_id])
+                expected_points.append(full_expected_locations[idx])
+
+        print(f"DEBUG Transformation setup:")
+        print(f"  Detected fiducials: {len(detected_points)}")
+        print(f"  Expected points: {expected_points}")
+        print(f"  Detected points: {detected_points}")
+
+        # Print detailed fiducial locations
+        if tag_center_locations is not None:
+            fiducial_str = ", ".join(
+                f"({tag_id}, {int(tag_center_locations[tag_id][0])}, {int(tag_center_locations[tag_id][1])})"
+                for tag_id in sorted(tag_center_locations.keys())
+            )
+            print(f"  Fiducials (processing res): {fiducial_str}")
+
+        if len(detected_points) >= 4:
+            # Use perspective transformation for 4 points
+            detected_pts = np.array(detected_points, dtype=np.float32)
+            expected_pts = np.array(expected_points, dtype=np.float32)
+            transform_matrix = cv2.getPerspectiveTransform(expected_pts, detected_pts)
+            print(f"  Using perspective transformation (4 points)")
+            print(f"  Transform matrix:\n{transform_matrix}")
+        elif len(detected_points) == 3:
+            # Use affine transformation for 3 points
+            detected_pts = np.array(detected_points, dtype=np.float32)
+            expected_pts = np.array(expected_points, dtype=np.float32)
+            transform_matrix = cv2.getAffineTransform(expected_pts, detected_pts)
+            print(f"  Using affine transformation (3 points)")
+            print(f"  Transform matrix:\n{transform_matrix}")
+        else:
+            print(f"  Not enough fiducials for transformation (need at least 3)")
+
+    # Draw all blocks from VFT layout
+    block_corners_list = []  # Collect block corners for debug output
+    for row, col in itertools.product(
+        range(vft_layout.numrows), range(vft_layout.numcols)
+    ):
+        block_id = (row * vft_layout.numcols) + col
+        # Get the block coordinates (at processing resolution) directly from row/col
+        x0 = vft_layout.x[col]
+        x1 = vft_layout.x[col] + vft_layout.block_width
+        y0 = vft_layout.y[row]
+        y1 = vft_layout.y[row] + vft_layout.block_height
+
+        # Transform block corners if we have a transformation matrix
+        if transform_matrix is not None:
+            # Create corner points
+            corners = np.array(
+                [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], dtype=np.float32
+            )
+
+            # Apply transformation
+            if transform_matrix.shape[0] == 3 and transform_matrix.shape[1] == 3:
+                # Perspective transformation
+                corners_homogeneous = np.hstack([corners, np.ones((4, 1))])
+                transformed = corners_homogeneous @ transform_matrix.T
+                transformed_corners = transformed[:, :2] / transformed[:, 2:3]
+            else:
+                # Affine transformation
+                corners_homogeneous = np.hstack([corners, np.ones((4, 1))])
+                transformed_corners = corners_homogeneous @ transform_matrix.T
+
+            # Scale to original resolution
+            transformed_corners[:, 0] *= scale_x
+            transformed_corners[:, 1] *= scale_y
+            transformed_corners = transformed_corners.astype(np.int32)
+        else:
+            # No transformation, just scale coordinates
+            transformed_corners = np.array(
+                [
+                    [int(x0 * scale_x), int(y0 * scale_y)],
+                    [int(x1 * scale_x), int(y0 * scale_y)],
+                    [int(x1 * scale_x), int(y1 * scale_y)],
+                    [int(x0 * scale_x), int(y1 * scale_y)],
+                ],
+                dtype=np.int32,
+            )
+
+        # Save first few blocks for debug output (to avoid too much output)
+        if block_id < 5:  # Only save first 5 blocks
+            block_corners_list.append(
+                (
+                    block_id,
+                    transformed_corners[0][0],
+                    transformed_corners[0][1],
+                    transformed_corners[2][0],
+                    transformed_corners[2][1],
+                )
+            )
+
+        if block_id in vft_layout.tag_block_ids:
+            # This is a fiducial block - draw circle with X if detected
+            if tag_center_locations is not None:
+                # Find which tag ID this block corresponds to
+                fiducial_index = vft_layout.tag_block_ids.index(block_id)
+                tag_id = vft_layout.tag_ids[fiducial_index]
+
+                # Check if this tag was actually detected
+                if tag_id in tag_center_locations:
+                    center_x, center_y = tag_center_locations[tag_id]
+
+                    # Scale coordinates from processing resolution to original resolution
+                    scaled_x = int(center_x * scale_x)
+                    scaled_y = int(center_y * scale_y)
+
+                    # Use a reasonable circle radius based on image size
+                    circle_radius = max(20, min(orig_height, orig_width) // 50)
+
+                    # Draw filled circle at detected position
+                    cv2.circle(
+                        img_output,
+                        (scaled_x, scaled_y),
+                        circle_radius,
+                        COLOR_FIDUCIAL_CIRCLE,
+                        -1,
+                    )
+
+                    # Draw X through the circle
+                    line_len = int(circle_radius * 1.5)
+                    line_thickness = max(3, circle_radius // 10)
+                    cv2.line(
+                        img_output,
+                        (scaled_x - line_len, scaled_y - line_len),
+                        (scaled_x + line_len, scaled_y + line_len),
+                        COLOR_FIDUCIAL_ARROW,
+                        line_thickness,
+                    )
+                    cv2.line(
+                        img_output,
+                        (scaled_x - line_len, scaled_y + line_len),
+                        (scaled_x + line_len, scaled_y - line_len),
+                        COLOR_FIDUCIAL_ARROW,
+                        line_thickness,
+                    )
+
+                    # Draw tag ID label
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = circle_radius / 20.0
+                    font_thickness = max(2, circle_radius // 15)
+                    cv2.putText(
+                        img_output,
+                        f"ID:{tag_id}",
+                        (scaled_x + line_len, scaled_y - line_len),
+                        font,
+                        font_scale,
+                        COLOR_FIDUCIAL_TEXT,
+                        font_thickness,
+                    )
+        else:
+            # This is a data block - draw rectangle using transformed corners
+            rect_thickness = 1
+            cv2.polylines(
+                img_output,
+                [transformed_corners],
+                isClosed=True,
+                color=COLOR_BLOCK_BORDER,
+                thickness=rect_thickness,
+            )
+
+    print(f"DEBUG write_annotated_image_original:")
+    print(f"  Original video resolution: {orig_width}x{orig_height}")
+    print(f"  Processing resolution: {vft_layout.width}x{vft_layout.height}")
+    print(f"  Scale factors: {scale_x:.2f}x, {scale_y:.2f}x")
+    print(f"  Output image shape: {img_output.shape}")
+
+    # Print block corners debug info
+    if len(block_corners_list) > 0:
+        blocks_str = ", ".join(
+            f"({bid}, {x0}, {y0}, {x1}, {y1})"
+            for bid, x0, y0, x1, y1 in block_corners_list
+        )
+        print(f"  Blocks (first 5, original res): {blocks_str}")
+
+    cv2.imwrite(outfile_original, img_output)
+
+
+def write_annotated_image(
+    img_transformed,
+    img_original,
+    infile,
+    frame_num,
+    vft_layout,
+    frame_debug_mode,
+    tag_center_locations,
+    tag_expected_center_locations,
+):
+    """Write annotated VFT image based on debug mode."""
+    if frame_debug_mode in ("zoom", "all"):
+        write_annotated_image_zoom(
+            img_transformed,
+            infile,
+            frame_num,
+            vft_layout,
+            tag_center_locations,
+            tag_expected_center_locations,
+        )
+    if frame_debug_mode in ("original", "all"):
+        write_annotated_image_original(
+            img_original,
+            infile,
+            frame_num,
+            vft_layout,
+            tag_center_locations,
+            tag_expected_center_locations,
+        )
+
+
 def write_annotated_tag(
-    img,
+    img_transformed,
     vft_layout,
     outfile,
     mode="zoom",
@@ -703,15 +1055,26 @@ def write_annotated_tag(
     """Write annotated VFT tag image with fiducials and data blocks highlighted.
 
     Args:
-        img: Input image (already transformed)
+        img_transformed: Input image (already transformed)
         vft_layout: VFT layout object
         outfile: Output filename
         mode: "zoom" or "original" - controls annotation style
         tag_center_locations: Actual detected fiducial positions
         tag_expected_center_locations: Expected fiducial positions
     """
+    # Debug: print fiducial mapping info
+    print(f"DEBUG write_annotated_tag:")
+    print(f"  vft_layout.tag_ids = {vft_layout.tag_ids}")
+    print(f"  vft_layout.tag_block_ids = {vft_layout.tag_block_ids}")
+    if tag_center_locations:
+        print(f"  tag_center_locations has {len(tag_center_locations)} entries")
+    if tag_expected_center_locations:
+        print(
+            f"  tag_expected_center_locations has {len(tag_expected_center_locations)} entries"
+        )
+
     # Work with a copy to avoid modifying input
-    img_output = img.copy()
+    img_output = img_transformed.copy()
 
     # Convert grayscale to BGR for color drawing
     if len(img_output.shape) == 2:
@@ -734,16 +1097,23 @@ def write_annotated_tag(
         if block_id in vft_layout.tag_block_ids:
             # Only draw fiducials that were actually detected
             if tag_center_locations is not None:
-                # Find which fiducial this is (0, 1, 2, or 3)
+                # Find which tag ID this block corresponds to
                 fiducial_index = vft_layout.tag_block_ids.index(block_id)
-                if fiducial_index < len(tag_center_locations):
-                    # This fiducial was detected - draw red circle with X
+                tag_id = vft_layout.tag_ids[fiducial_index]
+
+                # Check if this tag was actually detected
+                if tag_id in tag_center_locations:
+                    # This fiducial was detected - draw circle with X
                     center_x = (x0 + x1) // 2
                     center_y = (y0 + y1) // 2
 
-                    # Draw red filled circle
+                    # Draw filled circle
                     cv2.circle(
-                        img_output, (center_x, center_y), circle_radius, (0, 0, 255), -1
+                        img_output,
+                        (center_x, center_y),
+                        circle_radius,
+                        COLOR_FIDUCIAL_CIRCLE,
+                        -1,
                     )
 
                     # Draw X through the circle (two diagonal lines)
@@ -753,14 +1123,14 @@ def write_annotated_tag(
                         img_output,
                         (center_x - line_len, center_y - line_len),
                         (center_x + line_len, center_y + line_len),
-                        (255, 255, 255),
+                        COLOR_FIDUCIAL_ARROW,
                         line_thickness,
                     )  # White X
                     cv2.line(
                         img_output,
                         (center_x - line_len, center_y + line_len),
                         (center_x + line_len, center_y - line_len),
-                        (255, 255, 255),
+                        COLOR_FIDUCIAL_ARROW,
                         line_thickness,
                     )  # White X
             else:
@@ -768,7 +1138,11 @@ def write_annotated_tag(
                 center_x = (x0 + x1) // 2
                 center_y = (y0 + y1) // 2
                 cv2.circle(
-                    img_output, (center_x, center_y), circle_radius, (0, 0, 255), -1
+                    img_output,
+                    (center_x, center_y),
+                    circle_radius,
+                    COLOR_FIDUCIAL_CIRCLE,
+                    -1,
                 )
                 line_len = int(circle_radius * 1.5)
                 line_thickness = max(3, circle_radius // 10)
@@ -776,20 +1150,22 @@ def write_annotated_tag(
                     img_output,
                     (center_x - line_len, center_y - line_len),
                     (center_x + line_len, center_y + line_len),
-                    (255, 255, 255),
+                    COLOR_FIDUCIAL_ARROW,
                     line_thickness,
                 )
                 cv2.line(
                     img_output,
                     (center_x - line_len, center_y + line_len),
                     (center_x + line_len, center_y - line_len),
-                    (255, 255, 255),
+                    COLOR_FIDUCIAL_ARROW,
                     line_thickness,
                 )
         else:
             # This is a data block: draw green rectangle
-            rect_thickness = max(2, 10 // 5)
-            cv2.rectangle(img_output, (x0, y0), (x1, y1), (0, 255, 0), rect_thickness)
+            rect_thickness = 1
+            cv2.rectangle(
+                img_output, (x0, y0), (x1, y1), COLOR_BLOCK_BORDER, rect_thickness
+            )
 
     cv2.imwrite(outfile, img_output)
 
@@ -1034,9 +1410,10 @@ def main(argv):
         # get infile
         if options.infile == "-":
             options.infile = "/dev/fd/0"
-        assert options.infile is not None, "error: need a valid in file"
+        assert options.infile is not None, "error: need a valid input file"
         num_read, status, vft_id = parse_file(
             options.infile,
+            0,  # frame_num,
             options.luma_threshold,
             options.width,
             options.height,
