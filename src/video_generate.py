@@ -116,13 +116,13 @@ def image_generate(
     if text0:
         x0 = 32
         y0 = 32
-        cv2.putText(img, text0, (x0, y0), font, 1, COLOR_BLACK, 16, cv2.LINE_AA)
-        cv2.putText(img, text0, (x0, y0), font, 1, COLOR_WHITE, 2, cv2.LINE_AA)
+        cv2.putText(img, text0, (x0, y0), font, fontscale, COLOR_BLACK, 12, cv2.LINE_AA)
+        cv2.putText(img, text0, (x0, y0), font, fontscale, COLOR_WHITE, 2, cv2.LINE_AA)
     if text1:
         x0 = 32
         y0 = 64
-        cv2.putText(img, text1, (x0, y0), font, 1, COLOR_BLACK, 16, cv2.LINE_AA)
-        cv2.putText(img, text1, (x0, y0), font, 1, COLOR_WHITE, 2, cv2.LINE_AA)
+        cv2.putText(img, text1, (x0, y0), font, fontscale, COLOR_BLACK, 12, cv2.LINE_AA)
+        cv2.putText(img, text1, (x0, y0), font, fontscale, COLOR_WHITE, 2, cv2.LINE_AA)
     if text2:
         x0 = 32
         y0 = image_info.height - 32
@@ -174,7 +174,6 @@ def video_generate(
     beep_frame_period,
     frame_period,
     outfile,
-    metiq_id,
     vft_id,
     rem,
     debug,
@@ -203,8 +202,19 @@ def video_generate(
             gray_num = graycode.tc_to_gray_code(actual_frame_num)
             # VFT 7x5 has 16 bits, use that for display
             num_bits = 16
-            text0 = f"version: {_version.__version__}"
-            text1 = f"id: {metiq_id} frame: {actual_frame_num} time: {time:.03f} gray_num: {gray_num:0{num_bits}b}"
+            # Calculate beep timing
+            frames_since_beep = frame_num % beep_frame_period
+            frames_to_next_beep = (
+                beep_frame_period - frames_since_beep
+                if frames_since_beep > 0
+                else beep_frame_period
+            )
+            time_since_beep = (
+                -frames_since_beep / fps
+            )  # negative because it's in the past
+            time_to_next_beep = frames_to_next_beep / fps
+            text0 = f"version: {_version.__version__} vft_id: {vft_id}"
+            text1 = f"frame: {actual_frame_num} gray_num: {gray_num:0{num_bits}b} time: {time:.03f} prev: {time_since_beep:.03f} next: {time_to_next_beep:.03f}"
             text2 = f"fps: {fps:.2f} resolution: {img.shape[1]}x{img.shape[0]} {rem}"
             beep_color = (frame_num % beep_frame_period) == 0
             img = image_generate(
@@ -324,6 +334,18 @@ def get_options(argv):
         ),
     )
     parser.add_argument(
+        "--frame-period",
+        action="store",
+        type=int,
+        dest="frame_period",
+        default=default_values["frame_period"],
+        metavar="FRAME_PERIOD",
+        help=(
+            "use FRAME_PERIOD frame period (default: %i)"
+            % default_values["frame_period"]
+        ),
+    )
+    parser.add_argument(
         "--noise",
         action="store_true",
         dest="noise",
@@ -375,9 +397,8 @@ def main(argv):
             options.fps,
             options.num_frames,
             options.beep_frame_period,
-            options.num_frames,
+            options.frame_period,
             options.outfile,
-            "default",
             VFT_ID,
             "",
             options.debug,

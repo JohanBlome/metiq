@@ -72,7 +72,6 @@ def media_generate(outfile, **kwarg):
         beep_period_frames,
         frame_period,
         video_filename,
-        "default",
         vft_id,
         rem,
         debug,
