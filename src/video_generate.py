@@ -93,6 +93,7 @@ def _pipe_frames_to_ffmpeg(width, height, fps, outfile, frame_generator):
 def image_generate(
     image_info,
     frame_num,
+    text0,
     text1,
     text2,
     beep_color,
@@ -112,9 +113,14 @@ def image_generate(
     color_background = COLOR_BACKGROUND if not beep_color else COLOR_BACKGROUND_ALT
     cv2.fillPoly(img, pts=[pts], color=color_background)
     # 2. write the text(s)
-    if text1:
+    if text0:
         x0 = 32
         y0 = 32
+        cv2.putText(img, text0, (x0, y0), font, 1, COLOR_BLACK, 16, cv2.LINE_AA)
+        cv2.putText(img, text0, (x0, y0), font, 1, COLOR_WHITE, 2, cv2.LINE_AA)
+    if text1:
+        x0 = 32
+        y0 = 64
         cv2.putText(img, text1, (x0, y0), font, 1, COLOR_BLACK, 16, cv2.LINE_AA)
         cv2.putText(img, text1, (x0, y0), font, 1, COLOR_WHITE, 2, cv2.LINE_AA)
     if text2:
@@ -195,13 +201,16 @@ def video_generate(
             time = (frame_num // fps) + (frame_num % fps) / fps
             actual_frame_num = frame_num % frame_period
             gray_num = graycode.tc_to_gray_code(actual_frame_num)
-            num_bits = math.ceil(math.log2(num_frames))
+            # VFT 7x5 has 16 bits, use that for display
+            num_bits = 16
+            text0 = f"version: {_version.__version__}"
             text1 = f"id: {metiq_id} frame: {actual_frame_num} time: {time:.03f} gray_num: {gray_num:0{num_bits}b}"
             text2 = f"fps: {fps:.2f} resolution: {img.shape[1]}x{img.shape[0]} {rem}"
             beep_color = (frame_num % beep_frame_period) == 0
             img = image_generate(
                 image_info,
                 actual_frame_num,
+                text0,
                 text1,
                 text2,
                 beep_color,
