@@ -60,6 +60,9 @@ def _pipe_frames_to_ffmpeg(width, height, fps, outfile, frame_generator):
         "pipe:0",
         "-c:v",
         "libx264",
+        # keyframe period (in frames)
+        "-g",
+        "30",
         "-pix_fmt",
         "yuv420p",
         outfile,
