@@ -78,6 +78,7 @@ COLOR_FIDUCIAL_CIRCLE = (0, 0, 255)  # red
 COLOR_FIDUCIAL_ARROW = (255, 255, 255)  # white
 COLOR_FIDUCIAL_TEXT = (255, 0, 0)  # blue
 COLOR_BLOCK_BORDER = (0, 255, 0)  # green
+COLOR_BLOCK_TEXT = (255, 0, 0)  # blue
 
 MIN_TAG_BORDER_SIZE = 2
 MIN_SIZE = 64
@@ -716,6 +717,8 @@ def parse_read_bits(
         if diff != last_min_diff:
             print(f"minimum diff was {diff}")
             last_min_diff = diff
+        # Compute VFT reading value for debug output
+        num_read, status = gray_bitstream_to_num(bit_stream)
         write_annotated_image(
             img_transformed,
             img_original,
@@ -725,6 +728,8 @@ def parse_read_bits(
             frame_debug_mode,
             tag_center_locations,
             tag_expected_center_locations,
+            num_read,
+            bit_stream,
         )
     return bit_stream
 
@@ -736,6 +741,8 @@ def write_annotated_image_zoom(
     vft_layout,
     tag_center_locations,
     tag_expected_center_locations,
+    num_read=None,
+    bit_stream=None,
 ):
     """Write annotated VFT image in zoom mode."""
     outfile_zoom = f"{infile}.vft_debug.frame_{frame_num}.zoom.png"
@@ -746,6 +753,8 @@ def write_annotated_image_zoom(
         mode="zoom",
         tag_center_locations=tag_center_locations,
         tag_expected_center_locations=tag_expected_center_locations,
+        num_read=num_read,
+        bit_stream=bit_stream,
     )
 
 
@@ -756,6 +765,8 @@ def write_annotated_image_original(
     vft_layout,
     tag_center_locations,
     tag_expected_center_locations,
+    num_read=None,
+    bit_stream=None,
 ):
     """Write annotated VFT image in original mode - shows detected fiducials at full video resolution."""
     outfile_original = f"{infile}.vft_debug.frame_{frame_num}.original.png"
@@ -996,7 +1007,81 @@ def write_annotated_image_original(
                 thickness=rect_thickness,
             )
 
+            # Add bit value annotation for each data block
+            if bit_stream is not None:
+                # Count how many data blocks (non-tag blocks) come before this block_id
+                data_block_index = sum(
+                    1 for i in range(block_id) if i not in vft_layout.tag_block_ids
+                )
+                bit_index_before_reversal = data_block_index // 2
+                if bit_index_before_reversal < len(bit_stream):
+                    # bit_stream string is formatted MSB-first (leftmost) to LSB-last (rightmost)
+                    # bit 0 (LSB) is the last character: bit_stream[-1]
+                    # bit 1 is second-to-last: bit_stream[-2], etc.
+                    bit_position = bit_index_before_reversal
+                    bit_value = bit_stream[-(bit_position + 1)]
+
+                    # Calculate center of block for text placement
+                    center_x = int((transformed_corners[0][0] + transformed_corners[2][0]) / 2)
+                    center_y = int((transformed_corners[0][1] + transformed_corners[2][1]) / 2)
+
+                    # Scale text based on image size with larger, bolder font
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = min(orig_height, orig_width) / 1600.0
+                    font_thickness = max(2, int(font_scale * 5))
+
+                    # Draw bit annotation
+                    cv2.putText(
+                        img_output,
+                        f"{bit_position}:{bit_value}",
+                        (center_x, center_y),
+                        font,
+                        font_scale,
+                        COLOR_BLOCK_TEXT,
+                        font_thickness,
+                    )
+
+    # Add VFT value and bit stream overlay at the bottom-left of the image
+    if num_read is not None and bit_stream is not None:
+        img_height, img_width = img_output.shape[:2]
+
+        # Format the text
+        text_line1 = f"Value: {num_read}"
+        text_line2 = f"Bits: {bit_stream}"
+
+        # Set font parameters - match the per-block annotation style
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        # Use same scaling as per-block annotations for original mode
+        font_scale = min(orig_height, orig_width) / 1600.0
+        font_thickness = max(2, int(font_scale * 5))
+        # Use same color as per-block annotations
+        font_color = COLOR_BLOCK_TEXT
+
+        # Get text size for positioning
+        (text_width1, text_height1), baseline1 = cv2.getTextSize(text_line1, font, font_scale, font_thickness)
+        (text_width2, text_height2), baseline2 = cv2.getTextSize(text_line2, font, font_scale, font_thickness)
+
+        # Position text at bottom-left with padding to avoid overlap
+        padding = 15
+        x1 = padding
+        y1 = img_height - text_height2 - baseline2 - padding * 2
+        x2 = padding
+        y2 = img_height - padding
+
+        # Draw text with black background for visibility
+        # Background rectangles
+        cv2.rectangle(img_output, (x1 - 5, y1 - text_height1 - 5), (x1 + text_width1 + 5, y1 + baseline1 + 5), (0, 0, 0), -1)
+        cv2.rectangle(img_output, (x2 - 5, y2 - text_height2 - 5), (x2 + text_width2 + 5, y2 + baseline2 + 5), (0, 0, 0), -1)
+
+        # Text
+        cv2.putText(img_output, text_line1, (x1, y1), font, font_scale, font_color, font_thickness)
+        cv2.putText(img_output, text_line2, (x2, y2), font, font_scale, font_color, font_thickness)
+
     print(f"DEBUG write_annotated_image_original:")
+    print(f"  VFT reading value: {num_read}")
+    if bit_stream is not None:
+        bit_stream_str = ''.join(str(b) for b in bit_stream)
+        print(f"  VFT bit stream: {bit_stream_str}")
     print(f"  Original video resolution: {orig_width}x{orig_height}")
     print(f"  Processing resolution: {vft_layout.width}x{vft_layout.height}")
     print(f"  Scale factors: {scale_x:.2f}x, {scale_y:.2f}x")
@@ -1022,6 +1107,8 @@ def write_annotated_image(
     frame_debug_mode,
     tag_center_locations,
     tag_expected_center_locations,
+    num_read=None,
+    bit_stream=None,
 ):
     """Write annotated VFT image based on debug mode."""
     if frame_debug_mode in ("zoom", "all"):
@@ -1032,6 +1119,8 @@ def write_annotated_image(
             vft_layout,
             tag_center_locations,
             tag_expected_center_locations,
+            num_read,
+            bit_stream,
         )
     if frame_debug_mode in ("original", "all"):
         write_annotated_image_original(
@@ -1041,6 +1130,8 @@ def write_annotated_image(
             vft_layout,
             tag_center_locations,
             tag_expected_center_locations,
+            num_read,
+            bit_stream,
         )
 
 
@@ -1051,6 +1142,8 @@ def write_annotated_tag(
     mode="zoom",
     tag_center_locations=None,
     tag_expected_center_locations=None,
+    num_read=None,
+    bit_stream=None,
 ):
     """Write annotated VFT tag image with fiducials and data blocks highlighted.
 
@@ -1061,6 +1154,8 @@ def write_annotated_tag(
         mode: "zoom" or "original" - controls annotation style
         tag_center_locations: Actual detected fiducial positions
         tag_expected_center_locations: Expected fiducial positions
+        num_read: VFT integer value read
+        bit_stream: Bit stream string with values 0, 1, or X
     """
     # Debug: print fiducial mapping info
     print(f"DEBUG write_annotated_tag:")
@@ -1082,6 +1177,42 @@ def write_annotated_tag(
 
     # Calculate circle radius based on block dimensions (33% of block size)
     circle_radius = min(vft_layout.block_width, vft_layout.block_height) // 3
+
+    # Add VFT value and bit stream overlay at the top of the image
+    if num_read is not None and bit_stream is not None:
+        img_height, img_width = img_output.shape[:2]
+
+        # Format the text
+        text_line1 = f"Value: {num_read}"
+        text_line2 = f"Bits: {bit_stream}"
+
+        # Set font parameters - match the per-block annotation style
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        # Use same scaling as per-block annotations for zoom mode
+        font_scale = min(vft_layout.block_width, vft_layout.block_height) / 150.0
+        font_thickness = max(2, int(font_scale * 5))
+        # Use same color as per-block annotations
+        font_color = COLOR_BLOCK_TEXT
+
+        # Get text size for positioning
+        (text_width1, text_height1), baseline1 = cv2.getTextSize(text_line1, font, font_scale, font_thickness)
+        (text_width2, text_height2), baseline2 = cv2.getTextSize(text_line2, font, font_scale, font_thickness)
+
+        # Position text at bottom-left with padding to avoid overlap
+        padding = 15
+        x1 = padding
+        y1 = img_height - text_height2 - baseline2 - padding * 2
+        x2 = padding
+        y2 = img_height - padding
+
+        # Draw text with black background for visibility
+        # Background rectangles
+        cv2.rectangle(img_output, (x1 - 5, y1 - text_height1 - 5), (x1 + text_width1 + 5, y1 + baseline1 + 5), (0, 0, 0), -1)
+        cv2.rectangle(img_output, (x2 - 5, y2 - text_height2 - 5), (x2 + text_width2 + 5, y2 + baseline2 + 5), (0, 0, 0), -1)
+
+        # Text
+        cv2.putText(img_output, text_line1, (x1, y1), font, font_scale, font_color, font_thickness)
+        cv2.putText(img_output, text_line2, (x2, y2), font, font_scale, font_color, font_thickness)
 
     for row, col in itertools.product(
         range(vft_layout.numrows), range(vft_layout.numcols)
@@ -1166,6 +1297,42 @@ def write_annotated_tag(
             cv2.rectangle(
                 img_output, (x0, y0), (x1, y1), COLOR_BLOCK_BORDER, rect_thickness
             )
+
+            # Add bit value annotation for each data block
+            if bit_stream is not None:
+                # Count how many data blocks (non-tag blocks) come before this block_id
+                data_block_index = sum(
+                    1 for i in range(block_id) if i not in vft_layout.tag_block_ids
+                )
+                bit_index_before_reversal = data_block_index // 2
+                if bit_index_before_reversal < len(bit_stream):
+                    # bit_stream string is formatted MSB-first (leftmost) to LSB-last (rightmost)
+                    # bit 0 (LSB) is the last character: bit_stream[-1]
+                    # bit 1 is second-to-last: bit_stream[-2], etc.
+                    bit_position = bit_index_before_reversal
+                    bit_value = bit_stream[-(bit_position + 1)]
+
+                    # Calculate center of block for text placement
+                    center_x = (x0 + x1) // 2
+                    center_y = (y0 + y1) // 2
+
+                    # Scale text based on block size with larger, bolder font
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    # Use smaller font for zoom mode
+                    scale_divisor = 150.0 if mode == "zoom" else 40.0
+                    font_scale = min(vft_layout.block_width, vft_layout.block_height) / scale_divisor
+                    font_thickness = max(2, int(font_scale * 5))
+
+                    # Draw bit annotation
+                    cv2.putText(
+                        img_output,
+                        f"{bit_position}:{bit_value}",
+                        (center_x, center_y),
+                        font,
+                        font_scale,
+                        COLOR_BLOCK_TEXT,
+                        font_thickness,
+                    )
 
     cv2.imwrite(outfile, img_output)
 
