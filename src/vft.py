@@ -56,7 +56,7 @@ DEFAULT_VFT_ID = "7x5"
 DEFAULT_TAG_BORDER_SIZE = 2
 DEFAULT_LUMA_THRESHOLD = 20
 DEFAULT_TAG_NUMBER = 4
-DEFAULT_VIDEO_PARSE_MODE = "average"
+DEFAULT_VIDEO_PARSE_MODE = "median"
 
 VFT_LAYOUT = {
     # "vft_id": [numcols, numrows, (aruco_tag_0, aruco_tag_1, aruco_tag_2)],
