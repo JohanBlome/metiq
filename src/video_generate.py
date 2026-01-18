@@ -11,6 +11,7 @@ import subprocess
 import sys
 import numpy as np
 
+import common
 import video_common
 import vft
 import _version
@@ -216,7 +217,7 @@ def video_generate(
                 -frames_since_beep / fps
             )  # negative because it's in the past
             time_to_next_beep = frames_to_next_beep / fps
-            text0 = f"version: {_version.__version__} vft_id: {vft_id}"
+            text0 = f"version: {_version.__version__} vft_id: {vft_id} url: {common.METIQ_URL}"
             text1 = f"frame: {actual_frame_num} gray_num: {gray_num:0{num_bits}b} time: {time:.03f} prev: {time_since_beep:.03f} next: {time_to_next_beep:.03f}"
             text2 = f"fps: {fps:.2f} resolution: {img.shape[1]}x{img.shape[0]} {rem}"
             beep_color = (frame_num % beep_frame_period) == 0

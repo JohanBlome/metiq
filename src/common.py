@@ -5,6 +5,7 @@ import subprocess
 import sys
 
 
+METIQ_URL = "https://github.com/chemag/metiq"
 DEFAULT_DEBUG = 0
 
 
