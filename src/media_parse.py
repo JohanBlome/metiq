@@ -6,6 +6,7 @@
 import sys
 
 import audio_parse
+import vft
 import video_parse
 
 
@@ -105,6 +106,7 @@ def media_parse_video(
     video_reader_class = kwargs.get("video_reader_class", None)
     frame_num_debug_output = kwargs.get("frame_num_debug_output", -1)
     frame_debug_mode = kwargs.get("frame_debug_mode", "all")
+    video_parse_mode = kwargs.get("video_parse_mode", vft.DEFAULT_VIDEO_PARSE_MODE)
 
     try:
         # recalculate the video results
@@ -124,6 +126,7 @@ def media_parse_video(
             video_reader_class=video_reader_class,
             frame_num_debug_output=frame_num_debug_output,
             frame_debug_mode=frame_debug_mode,
+            video_parse_mode=video_parse_mode,
             debug=debug,
         )
         if debug > 0:

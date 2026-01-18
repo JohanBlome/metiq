@@ -56,6 +56,7 @@ DEFAULT_VFT_ID = "7x5"
 DEFAULT_TAG_BORDER_SIZE = 2
 DEFAULT_LUMA_THRESHOLD = 20
 DEFAULT_TAG_NUMBER = 4
+DEFAULT_VIDEO_PARSE_MODE = "average"
 
 VFT_LAYOUT = {
     # "vft_id": [numcols, numrows, (aruco_tag_0, aruco_tag_1, aruco_tag_2)],
@@ -137,6 +138,7 @@ def graycode_parse(
     tag_expected_center_locations=None,
     frame_num_debug_output=-1,
     frame_debug_mode="all",
+    video_parse_mode=DEFAULT_VIDEO_PARSE_MODE,
     debug=0,
 ):
     global vft_layout
@@ -154,8 +156,10 @@ def graycode_parse(
             vft_layout,
             tag_center_locations,
             tag_expected_center_locations,
-            debug,
+            frame_num_debug_output=frame_num_debug_output,
             frame_debug_mode=frame_debug_mode,
+            video_parse_mode=video_parse_mode,
+            debug=debug,
         )
     else:
         bit_stream, vft_id = do_parse(
@@ -165,6 +169,7 @@ def graycode_parse(
             luma_threshold,
             frame_num_debug_output=frame_num_debug_output,
             frame_debug_mode=frame_debug_mode,
+            video_parse_mode=video_parse_mode,
             debug=debug,
         )
     # convert gray code in bit_stream to a number
@@ -253,6 +258,7 @@ def locked_parse(
     tag_expected_center_locations=None,
     frame_num_debug_output=-1,
     frame_debug_mode="all",
+    video_parse_mode=DEFAULT_VIDEO_PARSE_MODE,
     debug=0,
 ):
     img_transformed = None
@@ -294,6 +300,7 @@ def locked_parse(
         frame_debug_mode=frame_debug_mode,
         tag_center_locations=tag_center_locations,
         tag_expected_center_locations=tag_expected_center_locations,
+        video_parse_mode=video_parse_mode,
         debug=debug,
     )
     return bit_stream, vft_id
@@ -306,6 +313,7 @@ def do_parse(
     luma_threshold,
     frame_num_debug_output=-1,
     frame_debug_mode="all",
+    video_parse_mode=DEFAULT_VIDEO_PARSE_MODE,
     debug=0,
 ):
     ids = None
@@ -380,6 +388,7 @@ def do_parse(
         luma_threshold,
         frame_num_debug_output=frame_num_debug_output,
         frame_debug_mode=frame_debug_mode,
+        video_parse_mode=video_parse_mode,
         debug=debug,
     )
     return bit_stream, vft_id
@@ -657,6 +666,7 @@ def parse_read_bits(
     frame_debug_mode="all",
     tag_center_locations=None,
     tag_expected_center_locations=None,
+    video_parse_mode=DEFAULT_VIDEO_PARSE_MODE,
     debug=0,
 ):
     global last_min_diff
@@ -673,6 +683,7 @@ def parse_read_bits(
 
     # 2. read the per-block luma average value
     block_luma_avgs = []
+    block_luma_medians = []
     pixels_per_block = vft_layout.block_width * vft_layout.block_height
     for row, col in itertools.product(
         range(vft_layout.numrows), range(vft_layout.numcols)
@@ -691,6 +702,8 @@ def parse_read_bits(
         # calling np.mean is slower
         block_luma_avg = np.sum(img_luma_block) / pixels_per_block
         block_luma_avgs.append(block_luma_avg)
+        block_luma_median = np.nanmedian(img_luma_block)
+        block_luma_medians.append(block_luma_median)
 
     # 3. convert per-block luma averages to bits
     # TODO(chema): what we really want here is an adaptive luma
@@ -700,7 +713,25 @@ def parse_read_bits(
     # resort to a smaller threshold.
     bit_stream = []
     diff = 255
-    for luma1, luma2 in zip(block_luma_avgs[0::2], block_luma_avgs[1::2]):
+
+    # Choose which luma values to use based on video_parse_mode
+    if video_parse_mode == "median":
+        block_luma_values = block_luma_medians
+    else:  # default to "average"
+        block_luma_values = block_luma_avgs
+
+    # Bit reading decision logic:
+    # For each pair of consecutive blocks, compare the block luma values.
+    # If the difference is below luma_threshold, the bit is unreadable ("X").
+    # Otherwise, bit=1 if luma2>luma1, or bit=0 if luma2<luma1.
+    # This threshold-based approach ensures robustness against noise
+    # and compression artifacts.
+    # We use 2 different parsing modes to get the block luma value:
+    # * (1) average: A block luma is the average of the lumas of all
+    #   its pixels
+    # * (2) median: A block luma is the median of the lumas of all
+    #   its pixels
+    for luma1, luma2 in zip(block_luma_values[0::2], block_luma_values[1::2]):
         if abs(luma2 - luma1) < luma_threshold:
             bit = "X"
             if debug:

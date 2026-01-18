@@ -72,6 +72,7 @@ def image_parse(
     tag_expected_center_locations,
     frame_num_debug_output=-1,
     frame_debug_mode="all",
+    video_parse_mode=vft.DEFAULT_VIDEO_PARSE_MODE,
     debug=0,
 ):
     value_read, status = image_parse_raw(
@@ -84,6 +85,7 @@ def image_parse(
         tag_expected_center_locations=tag_expected_center_locations,
         frame_num_debug_output=frame_num_debug_output,
         frame_debug_mode=frame_debug_mode,
+        video_parse_mode=video_parse_mode,
         debug=debug,
     )
     return value_read, status
@@ -118,6 +120,7 @@ def video_parse(
     video_reader_class=None,
     frame_num_debug_output=-1,
     frame_debug_mode="all",
+    video_parse_mode=vft.DEFAULT_VIDEO_PARSE_MODE,
     debug=0,
 ):
     columns = ("frame_num", "timestamp", "frame_num_expected", "status", "value_read")
@@ -238,6 +241,7 @@ def video_parse(
                     tag_expected_center_locations,
                     frame_num_debug_output=frame_num_debug_output,
                     frame_debug_mode=frame_debug_mode,
+                    video_parse_mode=video_parse_mode,
                     debug=debug,
                 )
 
@@ -315,6 +319,7 @@ def video_parse(
                     tag_expected_center_locations,
                     frame_num_debug_output=frame_num_debug_output,
                     frame_debug_mode=frame_debug_mode,
+                    video_parse_mode=video_parse_mode,
                     debug=debug,
                 )
 
@@ -476,6 +481,7 @@ def image_parse_raw(
     tag_expected_center_locations=None,
     frame_num_debug_output=-1,
     frame_debug_mode="all",
+    video_parse_mode=vft.DEFAULT_VIDEO_PARSE_MODE,
     debug=0,
 ):
     num_read, status, vft_id = vft.graycode_parse(
@@ -488,6 +494,7 @@ def image_parse_raw(
         tag_expected_center_locations=tag_expected_center_locations,
         frame_num_debug_output=frame_num_debug_output,
         frame_debug_mode=frame_debug_mode,
+        video_parse_mode=video_parse_mode,
         debug=debug,
     )
     return num_read, status

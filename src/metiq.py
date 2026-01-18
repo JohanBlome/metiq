@@ -37,6 +37,7 @@ default_values = {
     "vft_id": vft.DEFAULT_VFT_ID,
     "vft_tag_border_size": vft.DEFAULT_TAG_BORDER_SIZE,
     "luma_threshold": vft.DEFAULT_LUMA_THRESHOLD,
+    "video_parse_mode": vft.DEFAULT_VIDEO_PARSE_MODE,
     # video parameters
     "num_frames": video_common.DEFAULT_NUM_FRAMES,
     "fps": video_common.DEFAULT_FPS,
@@ -167,6 +168,17 @@ input_args = {
             "type": float,
             "help": "Luma threshold",
             "default": default_values["luma_threshold"],
+        },
+    },
+    "video_parse_mode": {
+        "func": PARSE,
+        "short": "",
+        "long": "--video-parse-mode",
+        "args": {
+            "type": str,
+            "choices": ["average", "median"],
+            "help": "Video parse mode (average or median)",
+            "default": default_values["video_parse_mode"],
         },
     },
     "frame_num_debug_output": {
