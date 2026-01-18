@@ -1022,8 +1022,12 @@ def write_annotated_image_original(
                     bit_value = bit_stream[-(bit_position + 1)]
 
                     # Calculate center of block for text placement
-                    center_x = int((transformed_corners[0][0] + transformed_corners[2][0]) / 2)
-                    center_y = int((transformed_corners[0][1] + transformed_corners[2][1]) / 2)
+                    center_x = int(
+                        (transformed_corners[0][0] + transformed_corners[2][0]) / 2
+                    )
+                    center_y = int(
+                        (transformed_corners[0][1] + transformed_corners[2][1]) / 2
+                    )
 
                     # Scale text based on image size with larger, bolder font
                     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -1058,8 +1062,12 @@ def write_annotated_image_original(
         font_color = COLOR_BLOCK_TEXT
 
         # Get text size for positioning
-        (text_width1, text_height1), baseline1 = cv2.getTextSize(text_line1, font, font_scale, font_thickness)
-        (text_width2, text_height2), baseline2 = cv2.getTextSize(text_line2, font, font_scale, font_thickness)
+        (text_width1, text_height1), baseline1 = cv2.getTextSize(
+            text_line1, font, font_scale, font_thickness
+        )
+        (text_width2, text_height2), baseline2 = cv2.getTextSize(
+            text_line2, font, font_scale, font_thickness
+        )
 
         # Position text at bottom-left with padding to avoid overlap
         padding = 15
@@ -1070,17 +1078,45 @@ def write_annotated_image_original(
 
         # Draw text with black background for visibility
         # Background rectangles
-        cv2.rectangle(img_output, (x1 - 5, y1 - text_height1 - 5), (x1 + text_width1 + 5, y1 + baseline1 + 5), (0, 0, 0), -1)
-        cv2.rectangle(img_output, (x2 - 5, y2 - text_height2 - 5), (x2 + text_width2 + 5, y2 + baseline2 + 5), (0, 0, 0), -1)
+        cv2.rectangle(
+            img_output,
+            (x1 - 5, y1 - text_height1 - 5),
+            (x1 + text_width1 + 5, y1 + baseline1 + 5),
+            (0, 0, 0),
+            -1,
+        )
+        cv2.rectangle(
+            img_output,
+            (x2 - 5, y2 - text_height2 - 5),
+            (x2 + text_width2 + 5, y2 + baseline2 + 5),
+            (0, 0, 0),
+            -1,
+        )
 
         # Text
-        cv2.putText(img_output, text_line1, (x1, y1), font, font_scale, font_color, font_thickness)
-        cv2.putText(img_output, text_line2, (x2, y2), font, font_scale, font_color, font_thickness)
+        cv2.putText(
+            img_output,
+            text_line1,
+            (x1, y1),
+            font,
+            font_scale,
+            font_color,
+            font_thickness,
+        )
+        cv2.putText(
+            img_output,
+            text_line2,
+            (x2, y2),
+            font,
+            font_scale,
+            font_color,
+            font_thickness,
+        )
 
     print(f"DEBUG write_annotated_image_original:")
     print(f"  VFT reading value: {num_read}")
     if bit_stream is not None:
-        bit_stream_str = ''.join(str(b) for b in bit_stream)
+        bit_stream_str = "".join(str(b) for b in bit_stream)
         print(f"  VFT bit stream: {bit_stream_str}")
     print(f"  Original video resolution: {orig_width}x{orig_height}")
     print(f"  Processing resolution: {vft_layout.width}x{vft_layout.height}")
@@ -1195,8 +1231,12 @@ def write_annotated_tag(
         font_color = COLOR_BLOCK_TEXT
 
         # Get text size for positioning
-        (text_width1, text_height1), baseline1 = cv2.getTextSize(text_line1, font, font_scale, font_thickness)
-        (text_width2, text_height2), baseline2 = cv2.getTextSize(text_line2, font, font_scale, font_thickness)
+        (text_width1, text_height1), baseline1 = cv2.getTextSize(
+            text_line1, font, font_scale, font_thickness
+        )
+        (text_width2, text_height2), baseline2 = cv2.getTextSize(
+            text_line2, font, font_scale, font_thickness
+        )
 
         # Position text at bottom-left with padding to avoid overlap
         padding = 15
@@ -1207,12 +1247,40 @@ def write_annotated_tag(
 
         # Draw text with black background for visibility
         # Background rectangles
-        cv2.rectangle(img_output, (x1 - 5, y1 - text_height1 - 5), (x1 + text_width1 + 5, y1 + baseline1 + 5), (0, 0, 0), -1)
-        cv2.rectangle(img_output, (x2 - 5, y2 - text_height2 - 5), (x2 + text_width2 + 5, y2 + baseline2 + 5), (0, 0, 0), -1)
+        cv2.rectangle(
+            img_output,
+            (x1 - 5, y1 - text_height1 - 5),
+            (x1 + text_width1 + 5, y1 + baseline1 + 5),
+            (0, 0, 0),
+            -1,
+        )
+        cv2.rectangle(
+            img_output,
+            (x2 - 5, y2 - text_height2 - 5),
+            (x2 + text_width2 + 5, y2 + baseline2 + 5),
+            (0, 0, 0),
+            -1,
+        )
 
         # Text
-        cv2.putText(img_output, text_line1, (x1, y1), font, font_scale, font_color, font_thickness)
-        cv2.putText(img_output, text_line2, (x2, y2), font, font_scale, font_color, font_thickness)
+        cv2.putText(
+            img_output,
+            text_line1,
+            (x1, y1),
+            font,
+            font_scale,
+            font_color,
+            font_thickness,
+        )
+        cv2.putText(
+            img_output,
+            text_line2,
+            (x2, y2),
+            font,
+            font_scale,
+            font_color,
+            font_thickness,
+        )
 
     for row, col in itertools.product(
         range(vft_layout.numrows), range(vft_layout.numcols)
@@ -1320,7 +1388,10 @@ def write_annotated_tag(
                     font = cv2.FONT_HERSHEY_SIMPLEX
                     # Use smaller font for zoom mode
                     scale_divisor = 150.0 if mode == "zoom" else 40.0
-                    font_scale = min(vft_layout.block_width, vft_layout.block_height) / scale_divisor
+                    font_scale = (
+                        min(vft_layout.block_width, vft_layout.block_height)
+                        / scale_divisor
+                    )
                     font_thickness = max(2, int(font_scale * 5))
 
                     # Draw bit annotation
