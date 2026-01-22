@@ -217,8 +217,17 @@ def video_generate(
                 -frames_since_beep / fps
             )  # negative because it's in the past
             time_to_next_beep = frames_to_next_beep / fps
+            # Calculate avoffset: positive while approaching beep, negative while leaving
+            # Range: +half_period (far before beep) -> 0 (at beep) -> -half_period (far after beep)
+            half_period_sec = (beep_frame_period / fps) / 2
+            if -time_since_beep <= half_period_sec:
+                # First half: leaving beep (0 to -half_period)
+                avoffset = time_since_beep
+            else:
+                # Second half: approaching beep (+half_period to 0)
+                avoffset = time_to_next_beep
             text0 = f"version: {_version.__version__} vft_id: {vft_id} url: {common.METIQ_URL}"
-            text1 = f"frame: {actual_frame_num} gray_num: {gray_num:0{num_bits}b} time: {time:.03f} prev: {time_since_beep:.03f} next: {time_to_next_beep:.03f}"
+            text1 = f"frame: {actual_frame_num} gray_num: {gray_num:0{num_bits}b} time: {time:.03f} avoffset: {avoffset:+.03f}"
             text2 = f"fps: {fps:.2f} resolution: {img.shape[1]}x{img.shape[0]} {rem}"
             beep_color = (frame_num % beep_frame_period) == 0
             img = image_generate(
