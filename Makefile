@@ -25,6 +25,11 @@ VERSION=$(shell ./src/_version.py)
 
 tar: metiq.${VERSION}.tar.gz
 
+.PHONY: test
+test:
+	test/tests.py
+
+
 metiq.${VERSION}.tar.gz:
 	tar cvf metiq.${VERSION}.tar Makefile README.md ./src/*py
 	gzip -f metiq.${VERSION}.tar
