@@ -24,7 +24,7 @@ def run_metiq_cli(**settings):
     ret, stdout, stderr = common.run(command, debug=config.DEBUG)
     assert ret == 0, f"error: {stderr}"
 
-    command = f"python3 {metiq_path}/metiq.py analyze --input-audio {filename}.audio.csv --input-video {filename}.video.csv --audio-offset {audio_offset} -a all -d"
+    command = f"python3 {metiq_path}/metiq.py analyze --input-audio {filename}.audio.csv --input-video {filename}.video.csv --audio-offset {audio_offset} --no-video-smoothed -a all -d"
     ret, stdout, stderr = common.run(command, debug=config.DEBUG)
     assert ret == 0, f"error: {stderr}"
 
