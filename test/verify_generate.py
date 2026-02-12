@@ -125,7 +125,8 @@ def generate_test_file(**settings):
     debug = DEBUG
 
     # generate the (raw) video input
-    video_filename = tempfile.NamedTemporaryFile().name + ".rgb24"
+    fd, video_filename = tempfile.mkstemp(suffix=".rgb24")
+    os.close(fd)
 
     image_info = video_common.ImageInfo(width, height)
     vft_layout = vft.VFTLayout(width, height, vft_id)
@@ -183,7 +184,8 @@ def generate_test_file(**settings):
 
     duration_sec = num_frames / fps
     # generate the (raw) audio input
-    audio_filename = tempfile.NamedTemporaryFile().name + ".wav"
+    fd, audio_filename = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
     pre_samples = 0
     audio_generate(
         duration_sec,

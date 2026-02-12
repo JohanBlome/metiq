@@ -59,7 +59,8 @@ def media_generate(outfile, **kwarg):
     max_frame_num = 2**vft_layout.numbits
     frame_period = beep_period_frames * (max_frame_num // beep_period_frames)
     # generate the encoded video directly (no longer raw RGB24)
-    video_filename = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
+    fd, video_filename = tempfile.mkstemp(suffix=".mp4")
+    os.close(fd)
     rem = f"period: {beep_period_sec} freq_hz: {beep_freq} samples: {beep_duration_samples}"
     if len(audio_sample) > 0:
         rem = f"period: {beep_period_sec} signal: {audio_sample}"
@@ -78,7 +79,8 @@ def media_generate(outfile, **kwarg):
     )
     duration_sec = num_frames / fps
     # generate the (raw) audio input
-    audio_filename = tempfile.NamedTemporaryFile().name + ".wav"
+    fd, audio_filename = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
     audio_generate.audio_generate(
         duration_sec,
         audio_filename,

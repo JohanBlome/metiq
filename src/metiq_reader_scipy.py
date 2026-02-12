@@ -14,6 +14,7 @@ ffmpeg-based readers from metiq_reader_cv2.py or metiq_reader_ffmpeg.py.
 """
 
 import numpy as np
+import os
 import scipy.io.wavfile
 import scipy.signal
 import tempfile
@@ -66,7 +67,8 @@ class AudioReaderScipy(metiq_reader_generic.AudioReaderBase):
             return self._wav_file
 
         # Create a temporary WAV file
-        self._wav_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+        fd, self._wav_file = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
 
         # Build ffmpeg command
         # -vn: no video
